@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from app.database.database import engine
 
 app = FastAPI(
     title = "NSE AI Earnings Analysis Agent",
@@ -7,7 +8,7 @@ app = FastAPI(
 )
 
 @app.get("/")
-def home():
+def root():
     return {
         "message":"welcome to the NSE AI Earnings Analysis Agent!"
     }
