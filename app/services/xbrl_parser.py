@@ -53,3 +53,43 @@ class XBRLParser:
                 file.write(tag + "\n")
 
         print(f"Exported {len(tags)} tags.")
+
+    def extract_financial_data(self, root):
+        """
+        Extract important financial metrics from XBRL.
+
+        Returns
+        -------
+        dict
+            Dictionary containing extracted values.
+        """
+
+        # Tags we care about
+        required_tags = {
+            "RevenueFromOperations": "sales",
+            "Income": "total_income",
+            "OtherIncome": "other_income",
+            "Expenses": "total_expenses",
+            "EmployeeBenefitExpense": "employee_expense",
+            "FinanceCosts": "finance_cost",
+            "DepreciationDepletionAndAmortisationExpense": "depreciation",
+            "ProfitBeforeTax": "profit_before_tax",
+            "TaxExpense": "tax",
+            "ProfitLossForPeriod": "net_profit",
+            "BasicEarningsLossPerShareFromContinuingOperations": "basic_eps",
+            "DilutedEarningsLossPerShareFromContinuingOperations": "diluted_eps"
+        }
+
+        data = {}
+
+        # Visit every XML element
+        for element in root.iter():
+
+            # Remove namespace
+            tag = element.tag.split("}")[-1]
+
+            if tag in required_tags:
+
+                data[required_tags[tag]] = element.text
+
+        return data

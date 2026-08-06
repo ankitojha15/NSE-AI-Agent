@@ -12,7 +12,6 @@ xml = xbrl.download_xbrl(results[0]["xbrl"])
 
 root = parser.parse(xml)
 
-print(type(root))
-print(root.tag)
-parser.print_financial_tags(root)
-parser.export_tags(root)
+financials = parser.extract_financial_data(root)
+
+print(financials)
