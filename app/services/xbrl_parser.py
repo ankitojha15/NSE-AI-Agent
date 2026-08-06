@@ -54,6 +54,21 @@ class XBRLParser:
 
         print(f"Exported {len(tags)} tags.")
 
+    def _to_number(self, value):
+        """
+        Convert XBRL value into float.
+
+        Returns None if conversion fails.
+        """
+
+        if value is None:
+            return None
+
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
     def extract_financial_data(self, root):
         """
         Extract important financial metrics from XBRL.
@@ -90,6 +105,66 @@ class XBRLParser:
 
             if tag in required_tags:
 
-                data[required_tags[tag]] = element.text
+                data[required_tags[tag]] = self._to_number(element.text)
 
+        # ---------------------------------------------------------
+        # Calculate derived financial metrics
+        # ---------------------------------------------------------
+
+        sales = data.get("sales")
+        other_income = data.get("other_income", 0)
+        finance_cost = data.get("finance_cost", 0)
+        depreciation = data.get("depreciation", 0)
+        profit_before_tax = data.get("profit_before_tax")
+        net_profit = data.get("net_profit")
+
+
+        # EBITDA
+        # Formula:
+        # EBITDA = Profit Before Tax + Finance Cost + Depreciation
+        if (
+            profit_before_tax is not None
+            and finance_cost is not None
+            and depreciation is not None
+        ):
+            data["ebitda"] = (
+                profit_before_tax
+                + finance_cost
+                + depreciation
+            )
+
+
+        # Operating Profit
+        # Remove non-operating income
+        if (
+            data.get("ebitda") is not None
+            and other_income is not None
+        ):
+            data["operating_profit"] = (
+                data["ebitda"]
+                - other_income
+            )
+
+
+        # Operating Profit Margin (OPM)
+        if (
+            sales
+            and data.get("operating_profit") is not None
+        ):
+            data["opm"] = (
+                data["operating_profit"]
+                / sales
+            ) * 100
+
+
+        # Net Profit Margin
+        if (
+            sales
+            and net_profit is not None
+        ):
+            data["net_profit_margin"] = (
+                net_profit
+                / sales
+            ) * 100
+            
         return data
