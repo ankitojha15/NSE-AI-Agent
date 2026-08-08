@@ -53,6 +53,10 @@ class FinancialResult(Base):
     # we won't lose information if NSE adds new fields.
     raw_data = Column(JSON)
 
+    # Store parsed financial metrics extracted from XBRL.
+    # This avoids parsing the same XBRL file repeatedly.
+    financial_data = Column(JSON)
+
     # Timestamp when we stored this record.
     created_at = Column(
         DateTime,

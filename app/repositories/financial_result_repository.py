@@ -36,7 +36,8 @@ class FinancialResultRepository:
             audited=result_data.get("audited"),
             consolidated=result_data.get("consolidated"),
             xbrl_url=result_data.get("xbrl"),
-            raw_data=result_data
+            raw_data=result_data,
+            financial_data=result_data.get("financial_data")
         )
 
         self.db.add(result)
@@ -44,3 +45,55 @@ class FinancialResultRepository:
         self.db.refresh(result)
 
         return result
+
+    def get_company_history(self, symbol: str):
+        """
+        Return all financial results of a company ordered
+        by filing date (latest first).
+        """
+
+        return (
+            self.db.query(FinancialResult)
+            .filter(
+                FinancialResult.symbol == symbol
+            )
+            .order_by(
+                FinancialResult.filing_date.desc()
+            )
+            .all()
+        )
+
+    def get_latest_result(self, symbol: str):
+        """
+        Return the latest financial result for a company.
+        """
+
+        return (
+            self.db.query(FinancialResult)
+            .filter(
+                FinancialResult.symbol == symbol
+            )
+            .order_by(
+                FinancialResult.filing_date.desc()
+            )
+            .first()
+        )
+
+
+    def get_previous_result(self, symbol: str):
+        """
+        Return the previous financial result for a company.
+        """
+
+        return (
+            self.db.query(FinancialResult)
+            .filter(
+                FinancialResult.symbol == symbol
+            )
+            .order_by(
+                FinancialResult.filing_date.desc()
+            )
+            .offset(1)
+            .first()
+        )
+

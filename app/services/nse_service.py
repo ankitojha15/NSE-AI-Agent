@@ -1,6 +1,9 @@
 from app.services.http_client import HTTPClient
 from app.repositories.financial_result_repository import FinancialResultRepository
 from sqlalchemy.orm import Session
+from app.services.xbrl_service import XBRLService
+from app.services.xbrl_parser import XBRLParser
+
 
 class NseService:
     """
@@ -101,18 +104,44 @@ class NseService:
 
         new_results = []
 
+        # Create XBRL services once and reuse them.
+        xbrl_service = XBRLService()
+        parser = XBRLParser()
+
         for result in results:
 
-            # Skip if already stored
+            # Skip the record if it is already stored.
             if repository.exists(result.get("seqNumber")):
                 continue
 
-            # Store new record
+            # Parse XBRL when an XBRL URL is available.
+            if result.get("xbrl"):
+
+                try:
+                    # Download XBRL file.
+                    xml = xbrl_service.download_xbrl(
+                        result["xbrl"]
+                    )
+
+                    # Parse XML.
+                    root = parser.parse(xml)
+
+                    # Extract financial metrics.
+                    financial_data = parser.extract_financial_data(root)
+
+                    # Attach parsed financial data to the NSE record.
+                    result["financial_data"] = financial_data
+
+                except Exception as e:
+                    print(
+                        f"Failed to parse XBRL for "
+                        f"{result.get('symbol')}: {e}"
+                    )
+
+            # Store the new record.
             repository.create(result)
 
-            # Keep track of newly inserted records
+            # Keep track of newly inserted records.
             new_results.append(result)
 
         return new_results
-
-        
