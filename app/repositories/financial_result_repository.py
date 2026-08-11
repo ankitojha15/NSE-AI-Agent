@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-
+from app.utils.quarter_utils import get_quarter_dates
 from app.models.financial_results import FinancialResult
 
 
@@ -22,17 +22,37 @@ class FinancialResultRepository:
             is not None
         )
 
+    def get_by_seq_number(self, seq_number: str):
+        """
+        Return an existing financial result using NSE sequence number.
+        """
+        return (
+            self.db.query(FinancialResult)
+            .filter(FinancialResult.seq_number == seq_number)
+            .first()
+        )
+
     def create(self, result_data: dict):
         """
-        Store a new financial result.
+        Store a new integrated financial result.
         """
 
+        # Integrated Filing API uses seq_Id.
+        seq_number = result_data.get("seq_Id") or result_data.get("seqNumber")
+
+        from_date, to_date = get_quarter_dates(
+        result_data.get("qe_Date")
+        )
+
+        result_data["fromDate"] = from_date
+        result_data["toDate"] = to_date
+
         result = FinancialResult(
-            seq_number=result_data.get("seqNumber"),
+            seq_number=seq_number,
             symbol=result_data.get("symbol"),
-            company_name=result_data.get("companyName"),
-            filing_date=result_data.get("filingDate"),
-            period=result_data.get("period"),
+            company_name=result_data.get("cmName"),
+            filing_date=result_data.get("creation_Date"),
+            period=result_data.get("qe_Date"),
             audited=result_data.get("audited"),
             consolidated=result_data.get("consolidated"),
             xbrl_url=result_data.get("xbrl"),
@@ -41,6 +61,41 @@ class FinancialResultRepository:
         )
 
         self.db.add(result)
+
+        print("DB INSERT START:", seq_number)
+
+        self.db.commit()
+
+        print("DB COMMIT COMPLETE:", seq_number)
+
+        self.db.refresh(result)
+
+        print("DB REFRESH COMPLETE:", seq_number)
+
+        return result
+
+    def update_financial_data(
+        self,
+        seq_number: str,
+        financial_data: dict
+    ):
+        """
+        Update financial data for an existing result.
+        """
+
+        result = (
+            self.db.query(FinancialResult)
+            .filter(
+                FinancialResult.seq_number == seq_number
+            )
+            .first()
+        )
+
+        if not result:
+            return None
+
+        result.financial_data = financial_data
+
         self.db.commit()
         self.db.refresh(result)
 
@@ -48,8 +103,8 @@ class FinancialResultRepository:
 
     def get_company_history(self, symbol: str):
         """
-        Return all financial results of a company ordered
-        by filing date (latest first).
+        Return all financial results of a company.
+        Latest filing first.
         """
 
         return (
@@ -79,7 +134,6 @@ class FinancialResultRepository:
             .first()
         )
 
-
     def get_previous_result(self, symbol: str):
         """
         Return the previous financial result for a company.
@@ -96,4 +150,35 @@ class FinancialResultRepository:
             .offset(1)
             .first()
         )
+
+    def get_yoy_result(
+        self,
+        symbol: str,
+        target_from_date: str,
+        target_to_date: str
+    ):
+        """
+        Return the result for the same quarter
+        from the previous financial year.
+        """
+
+        results = (
+            self.db.query(FinancialResult)
+            .filter(
+                FinancialResult.symbol == symbol
+            )
+            .all()
+        )
+
+        for result in results:
+
+            raw_data = result.raw_data or {}
+
+            if (
+                raw_data.get("fromDate") == target_from_date
+                and raw_data.get("toDate") == target_to_date
+            ):
+                return result
+
+        return None
 

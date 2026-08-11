@@ -11,6 +11,8 @@ class XBRLService:
         self.client = HTTPClient()
 
     def download_xbrl(self, xbrl_url: str) -> str:
+        response = self.client.get(xbrl_url)
+        return response.text
         """
         Download an XBRL document.
 
@@ -23,7 +25,7 @@ class XBRLService:
         -------
         str
             XML content as a string.
-        """
+        """  
 
         response = self.client.get(xbrl_url)
 
