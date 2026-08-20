@@ -1,6 +1,7 @@
 import hashlib
 import math
 import re
+import uuid
 from datetime import datetime, timezone
 
 from qdrant_client import QdrantClient
@@ -30,6 +31,20 @@ def build_qdrant_client():
         port=settings.QDRANT_PORT,
         api_key=settings.QDRANT_API_KEY or None,
     )
+
+
+def stable_point_id(symbol: str):
+    """
+    Deterministic, valid Qdrant point ID for a company symbol.
+
+    Qdrant Cloud only accepts unsigned integers or UUIDs as point
+    IDs, so the raw symbol cannot be used directly. A UUID5 derived
+    from the symbol is stable: the same symbol always maps to the
+    same point, so re-running an analysis updates the existing vector
+    instead of creating duplicates.
+    """
+
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, symbol))
 
 
 class LocalHashEmbeddingProvider:
@@ -88,8 +103,9 @@ class VectorService:
     Stores and searches company analysis documents in Qdrant.
 
     - Embeddings are generated from the structured AI analysis text.
-    - The stable point ID is the company symbol, so re-running an
-      analysis updates the existing vector instead of duplicating it.
+    - The stable point ID is a UUID5 derived from the company symbol,
+      so re-running an analysis updates the existing vector instead of
+      duplicating it.
     - The collection is created automatically when it does not exist.
     """
 
@@ -174,12 +190,15 @@ class VectorService:
         """
         Store a structured analysis as a vector document.
 
-        Uses the symbol as the stable point ID: storing the same
-        company again updates the existing vector in place.
+        Uses a stable UUID5 derived from the symbol as the point ID:
+        storing the same company again updates the existing vector in
+        place. The raw symbol is kept in the payload metadata.
         """
 
         if not symbol:
             raise ValueError("symbol is required")
+
+        point_id = stable_point_id(symbol)
 
         text = self._analysis_text(structured_analysis)
 
@@ -207,7 +226,7 @@ class VectorService:
             collection_name=self.collection_name,
             points=[
                 PointStruct(
-                    id=symbol,
+                    id=point_id,
                     vector=vector,
                     payload=payload,
                 )
@@ -215,7 +234,7 @@ class VectorService:
         )
 
         return {
-            "point_id": symbol,
+            "point_id": point_id,
             "symbol": symbol,
             "seq_number": seq_number,
             "company_score": company_score,

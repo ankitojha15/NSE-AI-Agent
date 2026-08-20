@@ -11,6 +11,7 @@ from app.repositories.financial_result_repository import (
 from app.schemas.ai_analysis import LLMAnalysisResult
 from app.services.nse_service import NseService
 from app.services.pipeline_service import PipelineService
+from app.services.vector_service import stable_point_id
 
 
 def filing(symbol, qe_date, seq, financial_data=None):
@@ -194,7 +195,7 @@ def test_complete_flow():
 
     assert ai.calls == ["ABC"]
     assert len(qdrant.points["company_analyses"]) == 1
-    payload = qdrant.points["company_analyses"]["ABC"]["payload"]
+    payload = qdrant.points["company_analyses"][stable_point_id("ABC")]["payload"]
     assert payload["symbol"] == "ABC"
     assert payload["company_score"] == 78
 

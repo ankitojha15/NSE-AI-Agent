@@ -1,8 +1,10 @@
 import math
+import uuid
 
 from app.services.vector_service import (
     LocalHashEmbeddingProvider,
     VectorService,
+    stable_point_id,
 )
 
 
@@ -124,6 +126,21 @@ def main():
     print("  OK -> collection auto-created with correct vector size")
     client = None
 
+    # ========== 1b. STABLE VALID POINT ID ==========
+    print("== 1b. STABLE VALID POINT ID ==")
+
+    abc = stable_point_id("ABC")
+    abc_again = stable_point_id("ABC")
+    other = stable_point_id("KSHITIJPOL")
+
+    assert abc == abc_again, "same symbol must map to the same point ID"
+    assert abc != other, "different symbols must map to different point IDs"
+    assert str(uuid.UUID(abc)) == abc, "point ID must be a valid UUID"
+    assert isinstance(abc, str) and len(abc) == 36
+
+    print("  OK -> valid UUID, stable per symbol, distinct across symbols")
+    client = None
+
     # ========== 2. VECTOR UPSERT + METADATA ==========
     print("== 2. VECTOR UPSERT + METADATA ==")
     client, service = make_service()
@@ -135,10 +152,11 @@ def main():
         company_score=78,
     )
 
-    assert stored["point_id"] == "ABC"
+    assert stored["point_id"] == stable_point_id("ABC")
+    assert str(uuid.UUID(stored["point_id"])) == stored["point_id"]
     assert stored["company_score"] == 78
 
-    point = client.points["company_analyses"]["ABC"]
+    point = client.points["company_analyses"][stable_point_id("ABC")]
     assert len(point["vector"]) == 384
     assert math.isclose(
         math.sqrt(sum(v * v for v in point["vector"])), 1.0
@@ -159,15 +177,20 @@ def main():
     client, service = make_service()
 
     service.store_analysis("ABC", analysis("ABC", score=78), company_score=78)
+    first_id = list(client.points["company_analyses"].keys())[0]
     service.store_analysis("ABC", analysis("ABC", score=91), company_score=91)
 
     points = client.points["company_analyses"]
     assert len(points) == 1, f"expected 1 point, got {len(points)}"
-    assert points["ABC"]["payload"]["company_score"] == 91
-    assert points["ABC"]["payload"]["analyzed_at"]
+    assert first_id == stable_point_id("ABC")
+    assert list(points.keys())[0] == first_id
+    assert points[first_id]["payload"]["company_score"] == 91
+    assert points[first_id]["payload"]["analyzed_at"]
+    assert points[first_id]["payload"]["symbol"] == "ABC"
 
     service.store_analysis("DEF", analysis("DEF", score=55), company_score=55)
     assert len(points) == 2
+    assert stable_point_id("DEF") in points
 
     print("  OK -> same symbol updates the same point; new symbol adds")
     client = None
@@ -195,7 +218,7 @@ def main():
     )
 
     assert len(results) == 2, results
-    assert results[0]["point_id"] == "ABC", results
+    assert results[0]["point_id"] == stable_point_id("ABC"), results
     assert results[0]["score"] > results[1]["score"]
     assert results[0]["payload"]["company_score"] == 78
 
@@ -205,7 +228,7 @@ def main():
         limit=5,
         score_threshold=results[0]["score"] - 0.001,
     )
-    assert filtered and filtered[0]["point_id"] == "ABC"
+    assert filtered and filtered[0]["point_id"] == stable_point_id("ABC")
 
     print("  OK -> semantic search returns ranked analyses with payload")
     client = None
