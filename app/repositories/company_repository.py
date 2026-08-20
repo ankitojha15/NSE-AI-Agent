@@ -1,3 +1,4 @@
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.company import Company
@@ -57,7 +58,21 @@ class CompanyRepository:
             )
 
             self.db.add(company)
-            self.db.commit()
+
+            try:
+                self.db.commit()
+            except IntegrityError:
+                # A concurrent insert won the race for this symbol.
+                # Return the already-stored record instead of crashing.
+                self.db.rollback()
+
+                existing = self.get_by_symbol(symbol)
+
+                if existing is not None:
+                    return existing, "unchanged"
+
+                raise
+
             self.db.refresh(company)
 
             return company, "created"

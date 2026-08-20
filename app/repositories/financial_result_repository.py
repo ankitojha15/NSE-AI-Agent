@@ -1,3 +1,4 @@
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.utils.quarter_utils import get_quarter_dates
 from app.models.financial_results import FinancialResult
@@ -35,10 +36,29 @@ class FinancialResultRepository:
     def create(self, result_data: dict):
         """
         Store a new integrated financial result.
+
+        Safe against duplicate sequence numbers: if the filing already
+        exists, the existing record is returned instead of inserting a
+        duplicate. Missing financial_data is backfilled when the new
+        data provides it.
         """
 
         # Integrated Filing API uses seq_Id.
         seq_number = result_data.get("seq_Id") or result_data.get("seqNumber")
+
+        existing = self.get_by_seq_number(seq_number)
+
+        if existing:
+            if (
+                not existing.financial_data
+                and result_data.get("financial_data")
+            ):
+                return self.update_financial_data(
+                    seq_number,
+                    result_data["financial_data"]
+                )
+
+            return existing
 
         from_date, to_date = get_quarter_dates(
         result_data.get("qe_Date")
@@ -64,7 +84,13 @@ class FinancialResultRepository:
 
         print("DB INSERT START:", seq_number)
 
-        self.db.commit()
+        try:
+            self.db.commit()
+        except IntegrityError:
+            # A concurrent insert won the race for this sequence number.
+            # Return the already-stored record instead of crashing.
+            self.db.rollback()
+            return self.get_by_seq_number(seq_number)
 
         print("DB COMMIT COMPLETE:", seq_number)
 
@@ -73,6 +99,45 @@ class FinancialResultRepository:
         print("DB REFRESH COMPLETE:", seq_number)
 
         return result
+
+    def upsert(self, result_data: dict):
+        """
+        Insert a new filing or update an existing one.
+
+        Filings are matched by their unique NSE sequence number
+        (seq_Id / seqNumber) so the same filing is never stored twice.
+
+        If the filing already exists but its financial_data is missing
+        while new financial data is available, the existing record is
+        updated instead of inserting a duplicate.
+
+        Returns
+        -------
+        (FinancialResult, str)
+            The filing record and its state:
+            "created", "updated", or "unchanged".
+        """
+
+        seq_number = result_data.get("seq_Id") or result_data.get("seqNumber")
+
+        existing = self.get_by_seq_number(seq_number)
+
+        if existing is None:
+            return self.create(result_data), "created"
+
+        if (
+            not existing.financial_data
+            and result_data.get("financial_data")
+        ):
+            return (
+                self.update_financial_data(
+                    seq_number,
+                    result_data["financial_data"]
+                ),
+                "updated"
+            )
+
+        return existing, "unchanged"
 
     def update_financial_data(
         self,
