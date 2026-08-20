@@ -1,15 +1,24 @@
+import json
+import re
+
 from langchain_groq import ChatGroq
 
 from app.core.config import settings
+from app.schemas.ai_analysis import LLMAnalysisResult
+from app.schemas.financial_analysis import FinancialAnalysisContract
 
 
 class AIAnalysisService:
     """
-    Uses an LLM to analyze structured financial data.
+    Uses the configured Groq LLM (Step 0) to analyze structured
+    financial data.
+
+    analyze_structured produces a Pydantic-validated LLMAnalysisResult
+    based only on the provided FinancialAnalysisContract.
     """
 
-    def __init__(self):
-        self.llm = ChatGroq(
+    def __init__(self, llm=None):
+        self.llm = llm or ChatGroq(
             model="llama-3.3-70b-versatile",
             temperature=0.2,
             api_key=settings.GROQ_API_KEY
@@ -197,3 +206,100 @@ class AIAnalysisService:
         response = self.llm.invoke(prompt)
 
         return response.content
+
+    # ----------------------------------------------------------
+    # Structured analysis
+    # ----------------------------------------------------------
+
+    @staticmethod
+    def _extract_json_content(content: str):
+        """
+        Extract a JSON payload from an LLM response.
+
+        Tolerates markdown code fences and surrounding whitespace.
+        """
+
+        if content is None:
+            return None
+
+        cleaned = content.strip()
+
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
+
+        return cleaned.strip()
+
+    def _build_structured_prompt(self, contract: FinancialAnalysisContract):
+        contract_json = contract.model_dump_json()
+
+        return f"""
+    You are a professional financial research analyst.
+
+    Analyze the financial data below. The data is a
+    FinancialAnalysisContract.
+
+    STRICT RULES:
+    - Base your analysis ONLY on the data provided in the contract.
+    - NEVER invent financial numbers, metrics, reasons, events or
+    plans that are not present in the data.
+    - If a metric or comparison is unavailable, state that it is
+    unavailable.
+    - Do not provide investment advice.
+    - Do not make future predictions.
+
+    The contract contains:
+    - latest: the latest quarter metrics
+    - previous / same_quarter_last_year: the comparison periods
+    - qoq / yoy: per-metric comparisons with growth_percent
+    (absolute metrics) or change (margin metrics)
+    - periods: validated reporting period ranges
+    - completeness: which data is present or missing
+
+    Respond with ONLY a single JSON object using exactly this schema:
+    {{
+      "summary": "2-3 sentence summary",
+      "positive_factors": ["..."],
+      "negative_factors": ["..."],
+      "growth_analysis": ["..."],
+      "margin_analysis": ["..."],
+      "risk_factors": ["..."],
+      "company_score": 0-100 integer,
+      "score_explanation": "why the score was assigned"
+    }}
+
+    FINANCIAL CONTRACT (JSON):
+    {contract_json}
+
+    JSON OUTPUT:
+    """
+
+    def analyze_structured(
+        self,
+        contract: FinancialAnalysisContract
+    ) -> LLMAnalysisResult | None:
+        """
+        Generate a validated structured analysis for a contract.
+
+        Returns None when the LLM response is invalid, malformed or
+        fails Pydantic validation, so callers can fall back safely.
+        """
+
+        prompt = self._build_structured_prompt(contract)
+
+        try:
+            response = self.llm.invoke(prompt)
+
+            content = self._extract_json_content(
+                getattr(response, "content", None)
+            )
+
+            if not content:
+                return None
+
+            return LLMAnalysisResult.model_validate_json(content)
+
+        except (ValueError, TypeError, json.JSONDecodeError):
+            # Malformed JSON, missing fields, wrong types or an
+            # out-of-range score all land here.
+            return None
