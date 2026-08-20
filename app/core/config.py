@@ -13,5 +13,12 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     GROQ_API_KEY: str
 
+    # Qdrant vector store
+    QDRANT_HOST: str = "localhost"
+    QDRANT_PORT: int = 6333
+    QDRANT_API_KEY: str | None = None
+    QDRANT_COLLECTION_NAME: str = "company_analyses"
+    QDRANT_DIMENSION: int = 384
+
 
 settings = Settings()
