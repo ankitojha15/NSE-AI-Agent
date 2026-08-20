@@ -1,34 +1,40 @@
 from app.database.database import SessionLocal
 from app.services.nse_service import NseService
-from app.repositories.financial_result_repository import FinancialResultRepository
+from app.services.quarter_backfill_service import (
+    QuarterBackfillService
+)
 
 
 db = SessionLocal()
 
-service = NseService()
-repository = FinancialResultRepository(db)
+try:
+    nse_service = NseService()
 
-results = service.get_financial_results(
-    symbol="TCS",
-    from_date="01-01-2024",
-    to_date="31-12-2024"
-)
-
-print("NSE records:", len(results))
-
-for result in results:
-
-    seq = result.get("seqNumber")
-
-    print(
-        "SEQ:",
-        seq,
-        "| fromDate:",
-        result.get("fromDate"),
-        "| toDate:",
-        result.get("toDate"),
-        "| EXISTS:",
-        repository.exists(seq)
+    service = QuarterBackfillService(
+        db,
+        nse_service
     )
 
-db.close()
+    results = service.backfill_company(
+        "HDFCBANK"
+    )
+
+    print(
+        "\nTOTAL UNIQUE QUARTERS:",
+        len(results)
+    )
+
+    for result in results:
+
+        raw = result.raw_data or {}
+
+        print(
+            result.seq_number,
+            "|",
+            raw.get("fromDate"),
+            "|",
+            raw.get("toDate")
+        )
+
+finally:
+    db.close()

@@ -118,6 +118,43 @@ class FinancialResultRepository:
             .all()
         )
 
+    def get_company_quarters(self, symbol: str):
+        """
+        Return all unique quarterly financial results for a company.
+
+        Duplicate NSE filings for the same quarter are removed.
+        """
+
+        results = (
+            self.db.query(FinancialResult)
+            .filter(
+                FinancialResult.symbol == symbol
+            )
+            .order_by(
+                FinancialResult.filing_date.desc()
+            )
+            .all()
+        )
+
+        unique_quarters = {}
+
+        for result in results:
+
+            raw_data = result.raw_data or {}
+
+            from_date = raw_data.get("fromDate")
+            to_date = raw_data.get("toDate")
+
+            if not from_date or not to_date:
+                continue
+
+            quarter_key = (from_date, to_date)
+
+            if quarter_key not in unique_quarters:
+                unique_quarters[quarter_key] = result
+
+        return list(unique_quarters.values())
+
     def get_latest_result(self, symbol: str):
         """
         Return the latest financial result for a company.

@@ -69,6 +69,7 @@ class NseService:
             url += f"&to_date={to_date}"
 
         response = self.client.get(url)
+        print("REQUEST URL:", url)
 
         return response.json()
 
@@ -95,6 +96,41 @@ class NseService:
         response = self.client.get(url)
 
         return response.json()
+
+    def get_one_year_integrated_filings(
+        self,
+        index: str = "equities",
+        pages: int = 20,
+        size: int = 100
+    ):
+        """
+        Fetch enough integrated filings to cover approximately
+        one year of NSE financial results.
+        """
+
+        all_records = []
+
+        for page in range(1, pages + 1):
+
+            data = self.get_integrated_financial_results(
+                index=index,
+                page=page,
+                size=size
+            )
+
+            records = data.get("data", [])
+
+            if not records:
+                break
+
+            all_records.extend(records)
+
+            print(
+                f"FETCHED PAGE {page} | "
+                f"RECORDS: {len(records)}"
+            )
+
+        return all_records
 
     def sync_integrated_filings(self, db: Session):
         """

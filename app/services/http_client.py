@@ -1,5 +1,6 @@
 import requests
 
+
 class HTTPClient:
     """
     A reusable HTTP client for making API requests.
@@ -21,10 +22,8 @@ class HTTPClient:
         Runs automatically when an object is created.
         """
 
-        # Create a persistent HTTP session.
         self.session = requests.Session()
 
-        # Default headers sent with every request.
         self.headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -35,7 +34,7 @@ class HTTPClient:
 
     def get(self, url: str):
         """
-        Sends an HTTP GET request.
+        Sends an HTTP GET request with retry support.
 
         Parameters
         ----------
@@ -48,14 +47,28 @@ class HTTPClient:
             The response received from the server.
         """
 
-        # Send a GET request using the same session.
-        response = self.session.get(
-            url,
-            headers=self.headers,
-            timeout=30
-        )
+        last_exception = None
 
-        # Raise an exception for HTTP errors (404, 500, etc.)
-        response.raise_for_status()
+        for attempt in range(3):
 
-        return response
+            try:
+                response = self.session.get(
+                    url,
+                    headers=self.headers,
+                    timeout=30
+                )
+
+                response.raise_for_status()
+
+                return response
+
+            except requests.exceptions.ConnectionError as e:
+
+                last_exception = e
+
+                print(
+                    f"CONNECTION FAILED | "
+                    f"ATTEMPT: {attempt + 1}/3"
+                )
+
+        raise last_exception
