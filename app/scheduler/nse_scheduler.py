@@ -1,51 +1,86 @@
+"""
+Scheduler entry point for the fully automated NSE pipeline.
+
+Runs the complete pipeline once on startup and then every
+configured interval. Configuration lives in the existing
+application settings (SCHEDULER_INTERVAL_MINUTES and
+SCHEDULER_MAX_PAGES).
+
+Standalone execution:
+
+    python -m app.scheduler.nse_scheduler
+"""
+
 from apscheduler.schedulers.blocking import BlockingScheduler
 
+from app.core.config import settings
 from app.database.database import SessionLocal
-from app.services.nse_service import NseService
+from app.services.pipeline_service import PipelineService
 from app.utils.logger import logger
 
 
-def sync_nse_results():
+def run_automated_pipeline():
+    """Run the full automated earnings pipeline once."""
 
     db = SessionLocal()
 
     try:
-        logger.info("NSE sync started")
+        logger.info("AUTOMATED PIPELINE STARTED")
 
-        service = NseService()
+        pipeline = PipelineService(db)
 
-        new_records = service.sync_integrated_filings(db)
+        summary = pipeline.run(max_pages=settings.SCHEDULER_MAX_PAGES)
 
         logger.info(
-            f"NSE sync completed | "
-            f"new records: {len(new_records)}"
+            "AUTOMATED PIPELINE COMPLETED | "
+            "success: %s | "
+            "companies: success=%s insufficient=%s failed=%s | "
+            "duration: %ss",
+            summary["success"],
+            summary["companies_success"],
+            summary["companies_insufficient"],
+            summary["companies_failed"],
+            summary["duration_seconds"],
         )
 
         print(
-            f"NSE SYNC COMPLETE | "
-            f"NEW RECORDS: {len(new_records)}"
+            f"PIPELINE COMPLETE | "
+            f"success={summary['success']} | "
+            f"companies: "
+            f"success={summary['companies_success']} "
+            f"insufficient={summary['companies_insufficient']} "
+            f"failed={summary['companies_failed']} | "
+            f"duration={summary['duration_seconds']}s"
         )
 
     except Exception:
-        logger.exception("NSE sync failed")
+        logger.exception("AUTOMATED PIPELINE FAILED")
+        print("PIPELINE FAILED")
 
     finally:
         db.close()
 
 
-scheduler = BlockingScheduler()
+def start_scheduler():
+    """Start the blocking interval scheduler."""
 
-scheduler.add_job(
-    sync_nse_results,
-    "interval",
-    minutes=10,
-    max_instances=1,
-    coalesce=True
-)
+    scheduler = BlockingScheduler()
 
-print("NSE Scheduler Started")
-logger.info("NSE Scheduler Started")
+    scheduler.add_job(
+        run_automated_pipeline,
+        "interval",
+        minutes=settings.SCHEDULER_INTERVAL_MINUTES,
+        max_instances=1,
+        coalesce=True,
+    )
 
-sync_nse_results()
+    print("NSE Scheduler Started")
+    logger.info("NSE Scheduler Started")
 
-scheduler.start()
+    run_automated_pipeline()
+
+    scheduler.start()
+
+
+if __name__ == "__main__":
+    start_scheduler()

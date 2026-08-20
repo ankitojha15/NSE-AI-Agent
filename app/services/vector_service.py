@@ -9,6 +9,29 @@ from qdrant_client.models import Distance, PointStruct, VectorParams
 from app.core.config import settings
 
 
+def build_qdrant_client():
+    """
+    Build the real Qdrant client from the configured settings.
+
+    A full cloud URL (https://...) may be supplied either through
+    QDRANT_URL or through QDRANT_HOST. In that case the URL form is
+    used; otherwise host/port are used.
+    """
+    url = settings.QDRANT_URL or None
+
+    if url or settings.QDRANT_HOST.startswith("http"):
+        return QdrantClient(
+            url=url or settings.QDRANT_HOST,
+            api_key=settings.QDRANT_API_KEY or None,
+        )
+
+    return QdrantClient(
+        host=settings.QDRANT_HOST,
+        port=settings.QDRANT_PORT,
+        api_key=settings.QDRANT_API_KEY or None,
+    )
+
+
 class LocalHashEmbeddingProvider:
     """
     Dependency-free, deterministic embedding provider.
@@ -80,11 +103,7 @@ class VectorService:
             collection_name or settings.QDRANT_COLLECTION_NAME
         )
 
-        self.client = client or QdrantClient(
-            host=settings.QDRANT_HOST,
-            port=settings.QDRANT_PORT,
-            api_key=settings.QDRANT_API_KEY or None,
-        )
+        self.client = client or build_qdrant_client()
 
         self.embedding_provider = (
             embedding_provider

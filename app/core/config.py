@@ -17,8 +17,13 @@ class Settings(BaseSettings):
     QDRANT_HOST: str = "localhost"
     QDRANT_PORT: int = 6333
     QDRANT_API_KEY: str | None = None
+    QDRANT_URL: str | None = None
     QDRANT_COLLECTION_NAME: str = "company_analyses"
     QDRANT_DIMENSION: int = 384
+
+    # Fully automated pipeline scheduler
+    SCHEDULER_INTERVAL_MINUTES: int = 10
+    SCHEDULER_MAX_PAGES: int = 50
 
 
 settings = Settings()
