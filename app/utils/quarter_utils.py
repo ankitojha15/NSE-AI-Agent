@@ -65,3 +65,45 @@ def is_valid_period(from_date, to_date):
         return True
     except ValueError:
         return False
+
+
+def derive_period(raw_data):
+    """
+    Derive (from_date, to_date) for a filing from its raw data.
+
+    Priority:
+      1. valid fromDate / toDate in the raw data
+      2. qe_Date (quarter period-end date)
+      3. period
+
+    The existing get_quarter_dates() logic is used so the derived
+    quarter is always identical to what repository.create() would
+    store. Returns None when no valid period can be derived.
+    """
+
+    if not raw_data:
+        return None
+
+    from_date = raw_data.get("fromDate")
+    to_date = raw_data.get("toDate")
+
+    if is_valid_period(from_date, to_date):
+        return (from_date, to_date)
+
+    qe_date = raw_data.get("qe_Date")
+
+    if qe_date:
+        period = get_quarter_from_qe_date(qe_date)
+
+        if period is not None:
+            return period
+
+    period_value = raw_data.get("period")
+
+    if period_value:
+        period = get_quarter_from_qe_date(period_value)
+
+        if period is not None:
+            return period
+
+    return None

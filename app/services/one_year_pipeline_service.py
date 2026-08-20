@@ -9,9 +9,10 @@ class OneYearPipelineService:
     Identifies companies that have four distinct quarterly filings.
     """
 
-    def __init__(self, nse_service, db=None):
+    def __init__(self, nse_service, db=None, filing_records=None):
         self.nse_service = nse_service
         self.db = db
+        self.filing_records = filing_records
 
     def get_eligible_companies(self, max_pages: int = 50):
         """
@@ -65,7 +66,8 @@ class OneYearPipelineService:
         self,
         symbol: str,
         min_quarters: int = 4,
-        max_pages: int = 50
+        max_pages: int = 50,
+        filing_records: list | None = None
     ):
         """
         Ensure a company has at least min_quarters usable quarters.
@@ -73,6 +75,10 @@ class OneYearPipelineService:
         When the company has fewer than the required number of usable
         quarters in the database, QuarterBackfillService is triggered
         automatically. The available quarters are re-checked afterwards.
+
+        filing_records, when provided, is the already-discovered
+        integrated-filings feed (fetched once per pipeline run) so no
+        NSE pages are re-downloaded for this company.
 
         Requires a database session (passed via the constructor).
 
@@ -86,7 +92,17 @@ class OneYearPipelineService:
         if self.db is None:
             raise ValueError("A database session is required")
 
-        backfill_service = QuarterBackfillService(self.db, self.nse_service)
+        records = (
+            filing_records
+            if filing_records is not None
+            else self.filing_records
+        )
+
+        backfill_service = QuarterBackfillService(
+            self.db,
+            self.nse_service,
+            filing_records=records,
+        )
 
         return backfill_service.ensure_minimum_quarters(
             symbol,

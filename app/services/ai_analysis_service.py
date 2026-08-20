@@ -19,7 +19,7 @@ class AIAnalysisService:
 
     def __init__(self, llm=None):
         self.llm = llm or ChatGroq(
-            model="llama-3.3-70b-versatile",
+            model=settings.GROQ_MODEL,
             temperature=0.2,
             api_key=settings.GROQ_API_KEY
         )

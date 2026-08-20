@@ -1,6 +1,6 @@
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from app.utils.quarter_utils import get_quarter_dates
+from app.utils.quarter_utils import derive_period, get_quarter_dates
 from app.models.financial_results import FinancialResult
 
 
@@ -188,6 +188,10 @@ class FinancialResultRepository:
         Return all unique quarterly financial results for a company.
 
         Duplicate NSE filings for the same quarter are removed.
+
+        A quarter is derived from the raw period dates with a fallback
+        to qe_Date / period, so legacy rows that store only the period
+        end date remain countable.
         """
 
         results = (
@@ -205,15 +209,12 @@ class FinancialResultRepository:
 
         for result in results:
 
-            raw_data = result.raw_data or {}
+            period = derive_period(result.raw_data or {})
 
-            from_date = raw_data.get("fromDate")
-            to_date = raw_data.get("toDate")
-
-            if not from_date or not to_date:
+            if period is None:
                 continue
 
-            quarter_key = (from_date, to_date)
+            quarter_key = period
 
             if quarter_key not in unique_quarters:
                 unique_quarters[quarter_key] = result

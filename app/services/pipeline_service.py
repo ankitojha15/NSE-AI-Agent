@@ -352,6 +352,8 @@ class PipelineService:
         return sorted(symbols)
 
     def _process_company(self, symbol: str, max_pages: int):
+        print(f"PROCESSING COMPANY: {symbol}")
+
         result = {
             "symbol": symbol,
             "status": "failed",
@@ -364,6 +366,7 @@ class PipelineService:
                 symbol,
                 min_quarters=MIN_QUARTERS,
                 max_pages=max_pages,
+                filing_records=self._filings,
             )
 
         except Exception:

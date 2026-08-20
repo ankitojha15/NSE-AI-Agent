@@ -43,14 +43,18 @@ class FakeNseService(NseService):
     def __init__(self, companies, filings):
         self._companies = companies
         self._filings = filings
+        self.get_all_calls = 0
+        self.page_calls = 0
 
     def get_equity_master(self):
         return self._companies
 
     def get_all_integrated_filings(self, index="equities", size=100, max_pages=50):
+        self.get_all_calls += 1
         return self._filings
 
     def get_integrated_financial_results(self, index="equities", page=1, size=100):
+        self.page_calls += 1
         start = (page - 1) * size
         return {"data": self._filings[start:start + size]}
 
@@ -194,6 +198,10 @@ def test_complete_flow():
     assert payload["symbol"] == "ABC"
     assert payload["company_score"] == 78
 
+    # Feed fetched once; backfill reused it instead of re-paginating.
+    assert nse.get_all_calls == 1, nse.get_all_calls
+    assert nse.page_calls == 0, nse.page_calls
+
     print("PASS: full pipeline completed, LLM called once, "
           "analysis persisted, vector stored")
 
@@ -219,6 +227,11 @@ def test_idempotent_execution():
     assert db.query(FinancialResult).count() == 5
     assert db.query(AnalysisResult).filter_by(symbol="ABC").count() == 1
     assert len(qdrant.points["company_analyses"]) == 1
+
+    # Each scheduler cycle fetched the feed once; backfill re-paginated
+    # neither cycle, and no duplicate quarters/rows were created.
+    assert nse.get_all_calls == 2, nse.get_all_calls
+    assert nse.page_calls == 0, nse.page_calls
 
     print("PASS: second run produced no duplicate rows or vectors")
 
@@ -297,8 +310,47 @@ def test_insufficient_quarterly_data():
     print("PASS: company with one quarter skipped without LLM or vector call")
 
 
+def test_feed_fetched_once_multiple_companies():
+    print("== 5. FEED FETCHED ONCE, REUSED ACROSS COMPANIES ==")
+
+    db = make_db()
+    filings = full_quarters() + [
+        # DEF has only 2 quarters in the feed -> insufficient.
+        filing("DEF", "31-MAR-2026", 301, {
+            "sales": 100, "ebitda": 30, "net_profit": 10,
+            "basic_eps": 1.0, "opm": 10.0, "net_profit_margin": 10.0,
+        }),
+        filing("DEF", "31-DEC-2025", 302, {
+            "sales": 90, "ebitda": 25, "net_profit": 9,
+            "basic_eps": 0.9, "opm": 9.0, "net_profit_margin": 10.0,
+        }),
+    ]
+    nse = FakeNseService(
+        [equity_record("ABC"), equity_record("DEF")],
+        filings,
+    )
+    ai = FakeAIService()
+    qdrant = FakeQdrantClient()
+
+    pipeline = make_pipeline(db, nse, ai, qdrant)
+    summary = pipeline.run(max_pages=50)
+
+    assert summary["companies_success"] == 1
+    assert summary["companies_insufficient"] == 1
+
+    statuses = {c["symbol"]: c["status"] for c in summary["companies"]}
+    assert statuses["ABC"] == "ok"
+    assert statuses["DEF"] == "insufficient_quarters"
+
+    # One feed fetch for the whole run; no per-company NSE pagination.
+    assert nse.get_all_calls == 1, nse.get_all_calls
+    assert nse.page_calls == 0, nse.page_calls
+
+    print("PASS: one feed fetch served every company's backfill")
+
+
 def test_mocked_llm_and_qdrant():
-    print("== 5. MOCKED LLM + MOCKED QDRANT STORAGE ==")
+    print("== 6. MOCKED LLM + MOCKED QDRANT STORAGE ==")
 
     db = make_db()
     nse = FakeNseService([equity_record("ABC")], full_quarters())
@@ -320,12 +372,86 @@ def test_mocked_llm_and_qdrant():
           "no live LLM or Qdrant was contacted")
 
 
+def test_legacy_rows_count_toward_quarters():
+    print("== 7. LEGACY ROWS (qe_Date, no dates) COUNT AS QUARTERS ==")
+
+    db = make_db()
+
+    valid = [
+        filing("LEG", "31-MAR-2026", 501, {
+            "sales": 400, "ebitda": 120, "net_profit": 60,
+            "basic_eps": 6.0, "opm": 22.0, "net_profit_margin": 15.0,
+        }),
+        filing("LEG", "31-DEC-2025", 502, {
+            "sales": 300, "ebitda": 90, "net_profit": 50,
+            "basic_eps": 5.0, "opm": 20.0, "net_profit_margin": 16.67,
+        }),
+        filing("LEG", "30-SEP-2025", 503, {
+            "sales": 320, "ebitda": 100, "net_profit": 40,
+            "basic_eps": 4.0, "opm": 21.0, "net_profit_margin": 12.5,
+        }),
+    ]
+
+    repo = FinancialResultRepository(db)
+    for f in valid:
+        repo.create(f)
+
+    # 4th quarter stored as a legacy row: qe_Date only, no from/to dates.
+    legacy = {
+        "seq_Id": "999999",
+        "symbol": "LEG",
+        "cmName": "LEG Limited",
+        "creation_Date": "10-Aug-2026 12:00:00",
+        "qe_Date": "30-JUN-2026",
+        "audited": "Audited",
+        "consolidated": "Consolidated",
+        "xbrl": None,
+        "financial_data": {
+            "sales": 450, "ebitda": 130, "net_profit": 70,
+            "basic_eps": 7.0, "opm": 23.0, "net_profit_margin": 15.5,
+        },
+    }
+    db.add(FinancialResult(
+        seq_number="999999",
+        symbol="LEG",
+        company_name="LEG Limited",
+        period=None,
+        raw_data=legacy,
+        financial_data=legacy["financial_data"],
+    ))
+    db.commit()
+
+    # Feed returns the legacy quarter under the SAME seq (no new insert).
+    feed = valid + [filing("LEG", "30-JUN-2026", "999999", {
+        "sales": 450, "ebitda": 130, "net_profit": 70,
+        "basic_eps": 7.0, "opm": 23.0, "net_profit_margin": 15.5,
+    })]
+
+    nse = FakeNseService([equity_record("LEG")], feed)
+    ai = FakeAIService()
+    qdrant = FakeQdrantClient()
+
+    pipeline = make_pipeline(db, nse, ai, qdrant)
+    summary = pipeline.run(max_pages=50)
+
+    assert summary["companies_success"] == 1, summary
+    company = summary["companies"][0]
+    assert company["status"] == "ok", company
+    assert company["quarter_count"] == 4, company
+    assert ai.calls == ["LEG"], ai.calls
+    assert len(qdrant.points["company_analyses"]) == 1
+
+    print("PASS: legacy 4th quarter counted; company reached analysis")
+
+
 def main():
     test_complete_flow()
     test_idempotent_execution()
     test_individual_stage_failure()
     test_insufficient_quarterly_data()
+    test_feed_fetched_once_multiple_companies()
     test_mocked_llm_and_qdrant()
+    test_legacy_rows_count_toward_quarters()
     print("\nALL PIPELINE TESTS PASSED")
 
 

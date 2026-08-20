@@ -2,8 +2,8 @@ from app.repositories.financial_result_repository import (
     FinancialResultRepository
 )
 from app.utils.quarter_utils import (
+    derive_period,
     get_quarter_from_qe_date,
-    is_valid_period,
 )
 
 
@@ -13,40 +13,75 @@ class QuarterBackfillService:
     for a company using NSE integrated filings.
     """
 
-    def __init__(self, db, nse_service):
+    def __init__(self, db, nse_service, filing_records=None):
         self.repository = FinancialResultRepository(db)
         self.nse_service = nse_service
+        self.filing_records = filing_records
+        self._feed_cache = None
 
     def _usable_quarters(self, symbol: str):
         """
         Return the distinct usable quarters for a company from the DB.
 
-        A quarter is usable only when its from/to period dates are
-        present and valid. Duplicate quarters are counted once.
+        A quarter is usable when its period can be derived (fromDate /
+        toDate, qe_Date or period). Duplicate quarters are counted once.
         """
 
         quarters = set()
 
         for result in self.repository.get_company_quarters(symbol):
 
-            raw = result.raw_data or {}
+            period = derive_period(result.raw_data or {})
 
-            from_date = raw.get("fromDate")
-            to_date = raw.get("toDate")
-
-            if is_valid_period(from_date, to_date):
-                quarters.add((from_date, to_date))
+            if period is not None:
+                quarters.add(period)
 
         return quarters
 
+    def _get_feed_records(self, max_pages: int):
+        """
+        Return the integrated-filings feed to scan for backfill.
+
+        When filing_records were provided (e.g. the pipeline feed
+        fetched once per run), they are reused and no NSE request is
+        made. Otherwise the feed is fetched from NSE once and cached
+        on this instance so repeated companies never re-download the
+        same pages.
+        """
+
+        if self.filing_records is not None:
+            return self.filing_records
+
+        if self._feed_cache is None:
+
+            records = []
+
+            for page in range(1, max_pages + 1):
+
+                response = self.nse_service.get_integrated_financial_results(
+                    page=page,
+                    size=100
+                )
+
+                page_records = response.get("data", [])
+
+                if not page_records:
+                    break
+
+                records.extend(page_records)
+
+            self._feed_cache = records
+
+        return self._feed_cache
+
     def backfill_company(self, symbol: str, max_pages: int = 50):
         """
-        Fetch NSE integrated filings and store missing quarters
-        for the requested company.
+        Backfill missing quarters for a company using the available
+        integrated-filings feed.
 
-        NSE provides only the period-end date (qe_Date); the quarter
-        range is derived from it. Stops after four unique usable
-        quarters are available.
+        When a prepared feed was supplied (pipeline reuse), the feed is
+        scanned once in memory and no NSE pages are re-fetched for this
+        company. Stops after four unique usable quarters are available.
         """
 
         existing_quarters = self._usable_quarters(symbol)
@@ -60,59 +95,81 @@ class QuarterBackfillService:
             print("Already have 4 quarters.")
             return self.repository.get_company_quarters(symbol)
 
-        for page in range(1, max_pages + 1):
+        records = self._get_feed_records(max_pages)
 
-            response = self.nse_service.get_integrated_financial_results(
-                page=page,
-                size=100
+        available_matches = sum(
+            1
+            for record in records
+            if (
+                (record.get("symbol") or record.get("sym")) == symbol
+                and get_quarter_from_qe_date(record.get("qe_Date")) is not None
+            )
+        )
+
+        print(
+            f"AVAILABLE MATCHING FILINGS: "
+            f"{available_matches}"
+        )
+
+        for record in records:
+
+            record_symbol = (
+                record.get("symbol")
+                or record.get("sym")
             )
 
-            records = response.get("data", [])
+            if record_symbol != symbol:
+                continue
 
-            if not records:
-                break
+            quarter = get_quarter_from_qe_date(
+                record.get("qe_Date")
+            )
+
+            if quarter is None:
+                continue
+
+            if quarter in existing_quarters:
+                continue
+
+            seq_id = record.get("seq_Id") or record.get("seqNumber")
+
+            before = (
+                self.repository.get_by_seq_number(seq_id)
+                if seq_id else None
+            )
+
+            created = self.repository.create(record)
+
+            # A row is genuinely new only when create() actually
+            # persisted a different record than the one already stored
+            # for this sequence number.
+            persisted = (
+                created is not None
+                and (before is None or created.id != before.id)
+            )
+
+            if not persisted:
+                print(
+                    f"SKIPPED (not persisted): "
+                    f"{symbol} | {quarter[0]} → {quarter[1]}"
+                )
+                continue
 
             print(
-                f"PAGE {page} | RECORDS: {len(records)}"
+                f"NEW QUARTER: "
+                f"{quarter[0]} → {quarter[1]}"
             )
 
-            for record in records:
+            existing_quarters.add(quarter)
 
-                record_symbol = (
-                    record.get("symbol")
-                    or record.get("sym")
-                )
-
-                if record_symbol != symbol:
-                    continue
-
-                quarter = get_quarter_from_qe_date(
-                    record.get("qe_Date")
-                )
-
-                if quarter is None:
-                    continue
-
-                if quarter in existing_quarters:
-                    continue
-
+            if len(existing_quarters) >= 4:
                 print(
-                    f"NEW QUARTER: "
-                    f"{quarter[0]} → {quarter[1]}"
+                    "\nBACKFILL COMPLETE"
                 )
 
-                self.repository.create(record)
-
-                existing_quarters.add(quarter)
-
-                if len(existing_quarters) >= 4:
-                    print(
-                        "\nBACKFILL COMPLETE"
-                    )
-
-                    return self.repository.get_company_quarters(
-                        symbol
-                    )
+                return self.repository.get_company_quarters(
+                    symbol
+                )
 
         print(
             "\nBACKFILL FINISHED"
@@ -162,6 +219,16 @@ class QuarterBackfillService:
             )
 
         quarters = self._usable_quarters(symbol)
+
+        print(
+            f"QUARTERS AFTER BACKFILL: "
+            f"{len(quarters)}"
+        )
+
+        print(
+            "STATUS: "
+            f"{'ready_for_analysis' if len(quarters) >= min_quarters else 'insufficient_quarters'}"
+        )
 
         return {
             "symbol": symbol,

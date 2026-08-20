@@ -12,6 +12,7 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str
     GROQ_API_KEY: str
+    GROQ_MODEL: str = "openai/gpt-oss-120b"
 
     # Qdrant vector store
     QDRANT_HOST: str = "localhost"
