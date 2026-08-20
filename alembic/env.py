@@ -5,6 +5,7 @@ from sqlalchemy import pool
 
 from alembic import context
 
+from app.core.config import settings
 from app.database.database import Base
 from app.models.company import Company
 from app.models.financial_results import FinancialResult
@@ -12,6 +13,15 @@ from app.models.financial_results import FinancialResult
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
+
+# Use the application settings as the single source of truth
+# for the database connection instead of alembic.ini.
+# Escape % so configparser interpolation does not fail on
+# percent-encoded characters in the URL (e.g. %40).
+config.set_main_option(
+    "sqlalchemy.url",
+    settings.DATABASE_URL.replace("%", "%%")
+)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.

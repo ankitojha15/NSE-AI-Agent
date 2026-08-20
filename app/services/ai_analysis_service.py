@@ -1,7 +1,6 @@
 from langchain_groq import ChatGroq
-from dotenv import load_dotenv
 
-load_dotenv()
+from app.core.config import settings
 
 
 class AIAnalysisService:
@@ -12,7 +11,8 @@ class AIAnalysisService:
     def __init__(self):
         self.llm = ChatGroq(
             model="llama-3.3-70b-versatile",
-            temperature=0.2
+            temperature=0.2,
+            api_key=settings.GROQ_API_KEY
         )
 
     def prepare_filing_data(self, raw_data: dict):

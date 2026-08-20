@@ -1,8 +1,14 @@
-from app.services.http_client import HTTPClient
-from app.repositories.financial_result_repository import FinancialResultRepository
+import csv
+from io import StringIO
+
 from sqlalchemy.orm import Session
-from app.services.xbrl_service import XBRLService
+
+from app.repositories.company_repository import CompanyRepository
+from app.repositories.financial_result_repository import FinancialResultRepository
+from app.services.http_client import HTTPClient
 from app.services.xbrl_parser import XBRLParser
+from app.services.xbrl_service import XBRLService
+from app.utils.logger import logger
 
 
 class NseService:
@@ -11,12 +17,152 @@ class NseService:
     """
 
     BASE_URL = "https://www.nseindia.com"
+    EQUITY_MASTER_URL = (
+        "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+    )
 
     def __init__(self):
         """
         Create one reusable HTTP client.
         """
         self.client = HTTPClient()
+
+    def get_equity_master(self) -> list:
+        """
+        Fetch the NSE equity master file.
+
+        This is the official list of all companies listed on NSE,
+        so no manually maintained company-symbol list is required.
+
+        Returns
+        -------
+        list
+            List of company records (symbol, company_name,
+            series, isin).
+        """
+
+        response = self.client.get(self.EQUITY_MASTER_URL)
+
+        reader = csv.reader(StringIO(response.text))
+
+        header = None
+
+        for row in reader:
+
+            if not row:
+                continue
+
+            # The header row contains the SYMBOL column.
+            # Rows before the header (e.g. legacy homepage rows)
+            # are skipped.
+            if "SYMBOL" not in row:
+                continue
+
+            header = [column.strip() for column in row]
+            break
+
+        if header is None:
+            raise ValueError("NSE equity master header row not found")
+
+        companies = []
+
+        for row in reader:
+
+            if len(row) < len(header):
+                continue
+
+            record = dict(zip(header, row))
+
+            companies.append(
+                {
+                    "symbol": record.get("SYMBOL", "").strip(),
+                    "company_name": (
+                        record.get("NAME OF COMPANY", "").strip()
+                    ),
+                    "series": record.get("SERIES", "").strip(),
+                    "isin": record.get("ISIN NUMBER", "").strip(),
+                }
+            )
+
+        return companies
+
+    def sync_listed_companies(self, db: Session):
+        """
+        Discover NSE-listed companies automatically and store them.
+
+        Companies are matched by their unique symbol so running this
+        multiple times never creates duplicates.
+
+        Parameters
+        ----------
+        db : Session
+            Database session.
+
+        Returns
+        -------
+        dict
+            Summary of the sync: fetched, new, updated,
+            unchanged, skipped, failed.
+        """
+
+        repository = CompanyRepository(db)
+
+        records = self.get_equity_master()
+
+        logger.info(
+            "EQUITY MASTER FETCHED | records: %s",
+            len(records)
+        )
+
+        summary = {
+            "fetched": len(records),
+            "new": 0,
+            "updated": 0,
+            "unchanged": 0,
+            "skipped": 0,
+            "failed": 0,
+        }
+
+        for record in records:
+
+            # Only the standard equity series represents
+            # regularly listed companies.
+            if record.get("series") != "EQ":
+                summary["skipped"] += 1
+                continue
+
+            if not record.get("symbol"):
+                summary["skipped"] += 1
+                continue
+
+            try:
+
+                _, state = repository.upsert(record)
+
+                if state == "created":
+                    summary["new"] += 1
+
+                elif state == "updated":
+                    summary["updated"] += 1
+
+                else:
+                    summary["unchanged"] += 1
+
+            except Exception:
+
+                logger.exception(
+                    "COMPANY UPSERT FAILED | symbol: %s",
+                    record.get("symbol")
+                )
+
+                summary["failed"] += 1
+
+        logger.info(
+            "COMPANY SYNC COMPLETE | summary: %s",
+            summary
+        )
+
+        return summary
 
     def get_financial_results(
         self,
@@ -131,6 +277,139 @@ class NseService:
             )
 
         return all_records
+
+    def get_all_integrated_filings(
+        self,
+        index: str = "equities",
+        size: int = 100,
+        max_pages: int = 50
+    ):
+        """
+        Fetch integrated financial filings with automatic pagination.
+
+        Pages are fetched one after another until:
+        - a page returns no records, or
+        - a page returns fewer records than the requested page size.
+
+        A maximum page limit protects against infinite requests.
+
+        Filings are read only from the NSE response "data" array and
+        deduplicated by their sequence number (seq_Id / seqNumber).
+
+        Parameters
+        ----------
+        index : str
+            equities / sme
+
+        size : int
+            Number of filings requested per page.
+
+        max_pages : int
+            Hard limit on the number of pages fetched.
+
+        Returns
+        -------
+        list
+            Unique integrated filing records.
+        """
+
+        unique_records = {}
+
+        page = 1
+
+        while page <= max_pages:
+
+            data = self.get_integrated_financial_results(
+                index=index,
+                page=page,
+                size=size
+            )
+
+            records = data.get("data") or []
+
+            logger.info(
+                "INTEGRATED FILINGS PAGE %s | records: %s",
+                page,
+                len(records)
+            )
+
+            for record in records:
+
+                seq_id = record.get("seq_Id") or record.get("seqNumber")
+
+                if seq_id:
+                    unique_records[seq_id] = record
+
+            # Last page reached when the response is empty
+            # or shorter than the requested page size.
+            if not records or len(records) < size:
+                break
+
+            page += 1
+
+        return list(unique_records.values())
+
+    def discover_new_filings(self, db: Session):
+        """
+        Discover integrated filings that are not yet stored.
+
+        Reads all integrated filings from NSE (with automatic
+        pagination and deduplication) and classifies each filing
+        as new or already-stored using the FinancialResultRepository.
+
+        This method never inserts or updates any filing.
+
+        Parameters
+        ----------
+        db : Session
+            Database session.
+
+        Returns
+        -------
+        dict
+            {
+                "fetched": int,
+                "new": [filings...],
+                "existing": [filings...]
+            }
+        """
+
+        repository = FinancialResultRepository(db)
+
+        records = self.get_all_integrated_filings()
+
+        new_filings = []
+        existing_filings = []
+
+        for record in records:
+
+            seq_id = record.get("seq_Id") or record.get("seqNumber")
+
+            if not seq_id:
+                logger.warning(
+                    "FILING WITHOUT SEQ NUMBER SKIPPED | %s",
+                    record.get("symbol")
+                )
+                continue
+
+            if repository.get_by_seq_number(seq_id):
+                existing_filings.append(record)
+            else:
+                new_filings.append(record)
+
+        logger.info(
+            "FILING DISCOVERY COMPLETE | "
+            "fetched: %s | new: %s | existing: %s",
+            len(records),
+            len(new_filings),
+            len(existing_filings)
+        )
+
+        return {
+            "fetched": len(records),
+            "new": new_filings,
+            "existing": existing_filings,
+        }
 
     def sync_integrated_filings(self, db: Session):
         """

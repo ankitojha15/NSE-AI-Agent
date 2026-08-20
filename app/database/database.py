@@ -1,12 +1,12 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from app.core.config import settings
 from app.database.models import Base
 from app.models.company import Company
 from app.models.financial_results import FinancialResult
 
-DATABASE_URL = "mysql+pymysql://root:12%40root12@localhost:3306/nse_ai"
 engine = create_engine(
-    DATABASE_URL
+    settings.DATABASE_URL
 )
 
 SessionLocal = sessionmaker(
