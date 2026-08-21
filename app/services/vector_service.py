@@ -186,13 +186,16 @@ class VectorService:
         seq_number: str | None = None,
         company_score: int | None = None,
         analyzed_at: str | None = None,
+        company_name: str | None = None,
+        market_cap: str | None = None,
     ):
         """
         Store a structured analysis as a vector document.
 
         Uses a stable UUID5 derived from the symbol as the point ID:
         storing the same company again updates the existing vector in
-        place. The raw symbol is kept in the payload metadata.
+        place. The raw symbol is kept in the payload metadata along
+        with the full company name and market cap when available.
         """
 
         if not symbol:
@@ -216,6 +219,8 @@ class VectorService:
 
         payload = {
             "symbol": symbol,
+            "company_name": company_name,
+            "market_cap": market_cap,
             "seq_number": seq_number,
             "company_score": company_score,
             "analyzed_at": analyzed_at,
@@ -236,6 +241,8 @@ class VectorService:
         return {
             "point_id": point_id,
             "symbol": symbol,
+            "company_name": company_name,
+            "market_cap": market_cap,
             "seq_number": seq_number,
             "company_score": company_score,
             "analyzed_at": analyzed_at,

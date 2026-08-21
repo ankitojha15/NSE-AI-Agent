@@ -18,37 +18,38 @@ class AIAnalysisService:
     based only on the provided FinancialAnalysisContract.
     """
 
-    def __init__(self, llm=None, gemini_llm=None):
+    def __init__(self, llm=None, cerebras_llm=None):
         self.llm = llm or ChatGroq(
             model=settings.GROQ_MODEL,
             temperature=0.0,
             api_key=settings.GROQ_API_KEY
         )
-        # Injected Gemini mock for tests, or None for lazy real client
-        self._gemini_llm = gemini_llm
-        self._gemini_instance = None
+        # Injected Cerebras mock for tests, or None for lazy real client
+        self._cerebras_llm = cerebras_llm
+        self._cerebras_instance = None
         self.last_provider_used: str | None = None
         self.last_error: Exception | None = None
 
     @property
-    def gemini_llm(self):
-        if self._gemini_llm is not None:
-            return self._gemini_llm
-        if self._gemini_instance is not None:
-            return self._gemini_instance
-        if not settings.GEMINI_API_KEY:
+    def cerebras_llm(self):
+        if self._cerebras_llm is not None:
+            return self._cerebras_llm
+        if self._cerebras_instance is not None:
+            return self._cerebras_instance
+        if not settings.CEREBRAS_API_KEY:
             return None
         try:
-            from langchain_google_genai import ChatGoogleGenerativeAI
+            from langchain_openai import ChatOpenAI
 
-            self._gemini_instance = ChatGoogleGenerativeAI(
-                model=settings.GEMINI_MODEL,
-                google_api_key=settings.GEMINI_API_KEY,
+            self._cerebras_instance = ChatOpenAI(
+                model=settings.CEREBRAS_MODEL,
+                api_key=settings.CEREBRAS_API_KEY,
+                base_url="https://api.cerebras.ai/v1",
                 temperature=0.0,
             )
-            return self._gemini_instance
+            return self._cerebras_instance
         except Exception as e:
-            logger.warning(f"Failed to init Gemini client: {e}")
+            logger.warning(f"Failed to init Cerebras client: {e}")
             return None
 
     @staticmethod
@@ -357,13 +358,14 @@ class AIAnalysisService:
         Generate a validated structured analysis for a contract.
 
         Primary: Groq. On HTTP 429 rate/quota error, falls back once to
-        Gemini with the identical prompt and validation. Other errors
+        Cerebras with the identical prompt and validation. Other errors
         (auth, validation, programming) do not trigger fallback.
 
-        Returns None when the LLM response is invalid/malformed so
-        callers can fall back to rule-based scoring. Raises on
-        rate-limit exhaustion (both providers failed) so the workflow
-        marks the company as failed (no Qdrant/Telegram).
+        Returns None when the LLM response is invalid/malformed or when
+        both providers are rate-limited/billing-blocked so callers can
+        fall back to deterministic rule-based analysis and still deliver
+        QoQ/YoY on Telegram. Only auth/programming errors outside
+        rate-limits raise.
         """
 
         prompt = self._build_structured_prompt(contract)
@@ -386,37 +388,37 @@ class AIAnalysisService:
             return result
 
         except Exception as exc:
-            # Rate/quota -> try Gemini once, do not retry Groq
+            # Rate/quota -> try Cerebras once, do not retry Groq
             if self._is_rate_limit_error(exc):
                 logger.warning(
-                    f"GROQ RATE LIMIT | symbol={contract.symbol} | error={exc} | falling back to Gemini ({settings.GEMINI_MODEL})"
+                    f"GROQ RATE LIMIT | symbol={contract.symbol} | error={exc} | falling back to Cerebras ({settings.CEREBRAS_MODEL})"
                 )
                 self.last_error = exc
-                gemini = self.gemini_llm
-                if gemini is None:
-                    logger.error("Gemini fallback not configured (missing GEMINI_API_KEY)")
-                    raise exc
+                cerebras = self.cerebras_llm
+                if cerebras is None:
+                    logger.warning(f"Cerebras fallback not configured (missing CEREBRAS_API_KEY) | symbol={contract.symbol} | using rule-based fallback")
+                    return None
                 try:
-                    response2 = gemini.invoke(prompt)
+                    response2 = cerebras.invoke(prompt)
                     content2 = self._extract_json_content(
                         getattr(response2, "content", None)
                     )
                     if not content2:
-                        logger.error("Gemini returned empty content")
-                        raise ValueError("Gemini empty response")
+                        logger.error("Cerebras returned empty content")
+                        raise ValueError("Cerebras empty response")
                     result2 = LLMAnalysisResult.model_validate_json(content2)
-                    self.last_provider_used = "gemini"
-                    logger.info(f"GEMINI FALLBACK SUCCESS | symbol={contract.symbol}")
+                    self.last_provider_used = "cerebras"
+                    logger.info(f"CEREBRAS FALLBACK SUCCESS | symbol={contract.symbol}")
                     return result2
                 except Exception as exc2:
-                    # Gemini structured validation errors (ValueError/TypeError/json) also count as Gemini failure
+                    # Cerebras failed (rate-limit, billing 402, validation) -> graceful fallback to rule-based
                     if isinstance(exc2, (ValueError, TypeError, json.JSONDecodeError)):
-                        logger.error(f"Gemini structured validation failed: {exc2}")
+                        logger.warning(f"Cerebras structured validation failed, using rule-based fallback | symbol={contract.symbol} | error={exc2}")
                     else:
-                        logger.error(f"Gemini fallback also failed: {exc2}")
+                        logger.warning(f"Cerebras fallback also failed, using rule-based fallback | symbol={contract.symbol} | error={exc2} | groq_error={exc}")
                     self.last_error = exc2
-                    # Both providers failed -> propagate original Groq rate-limit to mark company failed
-                    raise exc
+                    # Return None so workflow uses deterministic score and still completes (QoQ/YoY delivered)
+                    return None
             # Auth errors must not fallback
             if self._is_auth_error(exc):
                 logger.error(f"GROQ AUTH ERROR (no fallback) | symbol={contract.symbol} | error={exc}")

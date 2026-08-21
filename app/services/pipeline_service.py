@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.repositories.company_repository import CompanyRepository
 from app.repositories.financial_result_repository import (
     FinancialResultRepository,
 )
@@ -355,11 +356,46 @@ class PipelineService:
 
         return sorted(symbols)
 
+    def _resolve_company_display(self, symbol: str):
+        """Return (company_name, market_cap) for display; cached per run."""
+
+        # Full name: Company table first, then latest financial result fallback
+        company_name = None
+        try:
+            repo = CompanyRepository(self.db)
+            company = repo.get_by_symbol(symbol)
+            if company and company.company_name:
+                company_name = company.company_name
+        except Exception:
+            pass
+
+        if not company_name:
+            try:
+                latest = self.financial_repo.get_latest_result(symbol)
+                if latest and latest.raw_data:
+                    company_name = latest.raw_data.get("cmName") or latest.company_name
+            except Exception:
+                pass
+
+        # Market cap via NSE quote API (cached per symbol in NseService)
+        market_cap = None
+        try:
+            market_cap = self.nse_service.get_market_cap(symbol)
+        except Exception:
+            market_cap = None
+
+        return company_name, market_cap
+
     def _process_company(self, symbol: str, max_pages: int):
-        print(f"PROCESSING COMPANY: {symbol}")
+        company_name, market_cap = self._resolve_company_display(symbol)
+        display = f"{symbol} ({company_name})" if company_name else symbol
+        cap_display = f" - Market Cap: {market_cap}" if market_cap else ""
+        print(f"PROCESSING COMPANY: {display}{cap_display}")
 
         result = {
             "symbol": symbol,
+            "company_name": company_name,
+            "market_cap": market_cap,
             "status": "failed",
             "error": None,
         }
@@ -428,7 +464,12 @@ class PipelineService:
         # Stage 10 - store the analysis in Qdrant (isolated so a
         # vector-store outage never loses the persisted analysis).
         try:
-            vector = self._store_in_qdrant(symbol, state)
+            vector = self._store_in_qdrant(
+                symbol,
+                state,
+                company_name=result.get("company_name"),
+                market_cap=result.get("market_cap"),
+            )
             result["vector_point_id"] = (
                 vector.get("point_id") if vector else None
             )
@@ -449,6 +490,8 @@ class PipelineService:
                 analysis=analysis,
                 structured_analysis=state.get("structured_analysis"),
                 score=state.get("score"),
+                company_name=result.get("company_name"),
+                market_cap=result.get("market_cap"),
             )
             result["telegram_status"] = telegram.get("status")
         except Exception:
@@ -513,7 +556,13 @@ class PipelineService:
 
         return persisted_id
 
-    def _store_in_qdrant(self, symbol: str, state: dict):
+    def _store_in_qdrant(
+        self,
+        symbol: str,
+        state: dict,
+        company_name: str | None = None,
+        market_cap: str | None = None,
+    ):
         structured = state.get("structured_analysis")
 
         if not structured:
@@ -535,6 +584,8 @@ class PipelineService:
             structured_analysis=structured,
             seq_number=seq_number,
             company_score=state.get("score"),
+            company_name=company_name,
+            market_cap=market_cap,
         )
 
         self._stage_log(

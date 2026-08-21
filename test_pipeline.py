@@ -59,6 +59,10 @@ class FakeNseService(NseService):
         start = (page - 1) * size
         return {"data": self._filings[start:start + size]}
 
+    def get_market_cap(self, symbol: str):
+        # Deterministic mock market cap for tests
+        return f"₹10,000 Cr ({symbol})"
+
 
 class FakeAIService:
     """Mocked LLM: canned structured analysis, optional per-symbol failure."""
@@ -127,7 +131,8 @@ class FakeTelegramService:
         self.fail = False
 
     def send_analysis_notification(
-        self, symbol, analysis=None, structured_analysis=None, score=None
+        self, symbol, analysis=None, structured_analysis=None, score=None,
+        company_name=None, market_cap=None,
     ):
         self.calls.append(symbol)
 

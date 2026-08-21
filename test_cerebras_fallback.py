@@ -81,110 +81,100 @@ def full_quarters():
     ]
 
 def main():
-    # ========== 1. Groq success -> Gemini not called ==========
-    print("== 1. Groq success -> Gemini not called ==")
+    # ========== 1. Groq success -> Cerebras not called ==========
+    print("== 1. Groq success -> Cerebras not called ==")
     groq = FakeLLM(content=json.dumps(VALID_PAYLOAD))
-    gemini = FakeLLM(content=json.dumps(VALID_PAYLOAD))
-    svc = AIAnalysisService(llm=groq, gemini_llm=gemini)
+    cerebras = FakeLLM(content=json.dumps(VALID_PAYLOAD))
+    svc = AIAnalysisService(llm=groq, cerebras_llm=cerebras)
     result = svc.analyze_structured(make_contract())
     assert isinstance(result, LLMAnalysisResult)
     assert svc.last_provider_used == "groq"
     assert groq.calls == 1
-    assert gemini.calls == 0
+    assert cerebras.calls == 0
     print("  OK")
 
-    # ========== 2. Groq 429 -> Gemini succeeds ==========
-    print("== 2. Groq 429 -> Gemini succeeds ==")
+    # ========== 2. Groq 429 -> Cerebras succeeds ==========
+    print("== 2. Groq 429 -> Cerebras succeeds ==")
     groq = FakeLLM(error=FakeRateLimitError())
-    gemini = FakeLLM(content=json.dumps(VALID_PAYLOAD))
-    svc = AIAnalysisService(llm=groq, gemini_llm=gemini)
+    cerebras = FakeLLM(content=json.dumps(VALID_PAYLOAD))
+    svc = AIAnalysisService(llm=groq, cerebras_llm=cerebras)
     result = svc.analyze_structured(make_contract("XYZ"))
     assert isinstance(result, LLMAnalysisResult)
-    assert svc.last_provider_used == "gemini"
+    assert svc.last_provider_used == "cerebras"
     assert groq.calls == 1
-    assert gemini.calls == 1
+    assert cerebras.calls == 1
     # Same prompt sent to both
-    assert groq.last_prompt == gemini.last_prompt
+    assert groq.last_prompt == cerebras.last_prompt
     print("  OK")
 
-    # ========== 3. Groq 429 -> Gemini also fails (both fail -> company failed) ==========
-    print("== 3. Groq 429 -> Gemini also fails ==")
+    # ========== 3. Groq 429 -> Cerebras also fails -> graceful rule-based fallback (still delivers QoQ/YoY) ==========
+    print("== 3. Groq 429 -> Cerebras also fails -> fallback to rule-based ==")
     groq = FakeLLM(error=FakeRateLimitError())
-    gemini = FakeLLM(error=FakeRateLimitError("Gemini 429"))
-    svc = AIAnalysisService(llm=groq, gemini_llm=gemini)
-    try:
-        result = svc.analyze_structured(make_contract())
-        assert False, "should have raised"
-    except Exception as e:
-        assert "429" in str(e)
-        # Gemini was attempted once, not retry Groq
-        assert groq.calls == 1
-        assert gemini.calls == 1
-        print("  OK -> propagated as failure (no retry)")
+    cerebras = FakeLLM(error=FakeRateLimitError("Cerebras 429"))
+    svc = AIAnalysisService(llm=groq, cerebras_llm=cerebras)
+    result = svc.analyze_structured(make_contract())
+    assert result is None, "both rate-limited should return None for rule-based fallback"
+    assert groq.calls == 1
+    assert cerebras.calls == 1
+    print("  OK -> both rate-limited, returns None for rule-based fallback (no retry)")
 
-    # Verify workflow marks failed when both providers fail (no Qdrant/Telegram)
+    # Verify workflow completes with rule-based score when both providers rate-limited (QoQ/YoY still delivered)
     db = make_db()
     seed(db, full_quarters())
     groq = FakeLLM(error=FakeRateLimitError())
-    gemini = FakeLLM(error=FakeRateLimitError())
-    svc = AIAnalysisService(llm=groq, gemini_llm=gemini)
+    cerebras = FakeLLM(error=FakeRateLimitError())
+    svc = AIAnalysisService(llm=groq, cerebras_llm=cerebras)
     wf = AnalysisWorkflow(db, ai_service=svc)
-    try:
-        result = wf.run("ABC")
-        # Workflow should raise? Check if it marks failed or completes with fallback?
-        # Our service raises, so graph.invoke will raise -> workflow.run raises
-        assert False, "workflow should have raised"
-    except Exception:
-        print("  OK -> workflow raises, pipeline will mark failed, no Qdrant/Telegram")
-    # Ensure no AnalysisResult persisted as completed? Actually workflow didn't persist
+    result = wf.run("ABC")
+    assert result["status"] == "completed", result
+    assert result["llm_analysis_valid"] is False
+    assert result["structured_analysis"] is None
+    assert isinstance(result["score"], int)
+    print("  OK -> workflow completes with rule-based score, will still persist/Qdrant/Telegram")
     row = AnalysisResultRepository(db).get_by_symbol("ABC")
-    # It should be None or not completed, because exception happened before persist
-    # But after failure, pipeline will not persist; workflow itself doesn't persist on exception
-    assert row is None or row.status != "completed" or True  # allow any, just ensure not incorrectly marked completed via fallback
+    assert row is not None and row.status == "completed"
     db.close()
 
     # ========== 4. Groq auth error -> no fallback ==========
     print("== 4. Groq auth error -> no fallback ==")
     groq = FakeLLM(error=FakeAuthError())
-    gemini = FakeLLM(content=json.dumps(VALID_PAYLOAD))
-    svc = AIAnalysisService(llm=groq, gemini_llm=gemini)
+    cerebras = FakeLLM(content=json.dumps(VALID_PAYLOAD))
+    svc = AIAnalysisService(llm=groq, cerebras_llm=cerebras)
     try:
         result = svc.analyze_structured(make_contract())
         assert False, "should have raised auth error"
     except Exception as e:
         assert "401" in str(e) or "auth" in str(e).lower()
         assert groq.calls == 1
-        assert gemini.calls == 0
+        assert cerebras.calls == 0
         print("  OK -> auth error not falling back")
 
-    # ========== 5. Gemini structured output validation ==========
-    print("== 5. Gemini structured output validation ==")
-    # Groq 429, Gemini returns invalid JSON -> should be treated as both failed -> raise
+    # ========== 5. Cerebras structured output validation ==========
+    print("== 5. Cerebras structured output validation ==")
+    # Groq 429, Cerebras returns invalid JSON -> graceful fallback to rule-based (returns None)
     groq = FakeLLM(error=FakeRateLimitError())
-    gemini = FakeLLM(content="not json")
-    svc = AIAnalysisService(llm=groq, gemini_llm=gemini)
-    try:
-        result = svc.analyze_structured(make_contract())
-        assert False, "should have raised"
-    except Exception:
-        assert gemini.calls == 1
-        print("  OK -> Gemini invalid JSON treated as failure")
+    cerebras = FakeLLM(content="not json")
+    svc = AIAnalysisService(llm=groq, cerebras_llm=cerebras)
+    result = svc.analyze_structured(make_contract())
+    assert result is None
+    assert cerebras.calls == 1
+    print("  OK -> Cerebras invalid JSON returns None for rule-based fallback")
 
-    # Gemini returns valid JSON -> passes validation
+    # Cerebras returns valid JSON -> passes validation
     groq = FakeLLM(error=FakeRateLimitError())
-    gemini = FakeLLM(content=json.dumps(VALID_PAYLOAD))
-    svc = AIAnalysisService(llm=groq, gemini_llm=gemini)
+    cerebras = FakeLLM(content=json.dumps(VALID_PAYLOAD))
+    svc = AIAnalysisService(llm=groq, cerebras_llm=cerebras)
     result = svc.analyze_structured(make_contract())
     assert result.company_score == 80
-    print("  OK -> Gemini valid payload passes Pydantic")
+    print("  OK -> Cerebras valid payload passes Pydantic")
 
     # ========== 6. provider_used recorded correctly ==========
     print("== 6. provider_used recorded correctly ==")
     db = make_db()
     seed(db, full_quarters())
     groq = FakeLLM(content=json.dumps(VALID_PAYLOAD))
-    gemini = FakeLLM(content=json.dumps(VALID_PAYLOAD))
-    svc = AIAnalysisService(llm=groq, gemini_llm=gemini)
+    cerebras = FakeLLM(content=json.dumps(VALID_PAYLOAD))
+    svc = AIAnalysisService(llm=groq, cerebras_llm=cerebras)
     wf = AnalysisWorkflow(db, ai_service=svc)
     result = wf.run("ABC")
     row = AnalysisResultRepository(db).get_by_symbol("ABC")
@@ -195,27 +185,27 @@ def main():
     db = make_db()
     seed(db, full_quarters())
     groq = FakeLLM(error=FakeRateLimitError())
-    gemini = FakeLLM(content=json.dumps(VALID_PAYLOAD))
-    svc = AIAnalysisService(llm=groq, gemini_llm=gemini)
+    cerebras = FakeLLM(content=json.dumps(VALID_PAYLOAD))
+    svc = AIAnalysisService(llm=groq, cerebras_llm=cerebras)
     wf = AnalysisWorkflow(db, ai_service=svc)
     result = wf.run("ABC")
     row = AnalysisResultRepository(db).get_by_symbol("ABC")
-    assert row.provider_used == "gemini", row.provider_used
-    assert result["provider_used"] == "gemini"
-    print("  OK -> gemini recorded")
+    assert row.provider_used == "cerebras", row.provider_used
+    assert result["provider_used"] == "cerebras"
+    print("  OK -> cerebras recorded")
     db.close()
 
     # ========== 7. Do not repeatedly retry exhausted Groq quota ==========
     print("== 7. No repeated Groq retry ==")
     groq = FakeLLM(error=FakeRateLimitError())
-    gemini = FakeLLM(content=json.dumps(VALID_PAYLOAD))
-    svc = AIAnalysisService(llm=groq, gemini_llm=gemini)
+    cerebras = FakeLLM(content=json.dumps(VALID_PAYLOAD))
+    svc = AIAnalysisService(llm=groq, cerebras_llm=cerebras)
     svc.analyze_structured(make_contract())
     assert groq.calls == 1, "Groq should be called exactly once"
-    assert gemini.calls == 1, "Gemini should be called exactly once"
+    assert cerebras.calls == 1, "Cerebras should be called exactly once"
     print("  OK -> single fallback, no loop")
 
-    print("\nALL GEMINI FALLBACK CHECKS PASSED")
+    print("\nALL CEREBRAS FALLBACK CHECKS PASSED")
 
 if __name__ == "__main__":
     main()

@@ -26,6 +26,69 @@ class NseService:
         Create one reusable HTTP client.
         """
         self.client = HTTPClient()
+        self._market_cap_cache = {}
+
+    def get_market_cap(self, symbol: str) -> str | None:
+        """
+        Fetch market capitalization for a symbol via NSE quote API.
+
+        Returns a formatted string like "₹1,20,500 Cr" or None when
+        unavailable. Results are cached per instance to avoid repeated
+        NSE calls within a single pipeline run.
+        """
+
+        if not symbol:
+            return None
+
+        if symbol in self._market_cap_cache:
+            return self._market_cap_cache[symbol]
+
+        # NSE quote-equity endpoint; priceInfo may contain market cap
+        # fields. We try common keys and fall back to "N/A" gracefully.
+        url = f"{self.BASE_URL}/api/quote-equity?symbol={symbol}"
+
+        try:
+            response = self.client.get(url)
+            data = response.json()
+
+            # NSE quote structure varies; try priceInfo.marketCap etc.
+            price_info = data.get("priceInfo") or {}
+            market_cap = (
+                price_info.get("marketCap")
+                or price_info.get("mktCap")
+                or data.get("marketCap")
+                or data.get("mktCap")
+            )
+
+            # Some responses nest under "info" or provide "marketCap" in crores
+            if market_cap is None:
+                # Try securityWiseDP with market cap?
+                market_cap = data.get("securityWiseDP", {}).get("marketCap")
+
+            if market_cap is None:
+                self._market_cap_cache[symbol] = None
+                return None
+
+            # market_cap from NSE is often in crores already; format
+            try:
+                value = float(str(market_cap).replace(",", ""))
+            except (TypeError, ValueError):
+                self._market_cap_cache[symbol] = str(market_cap)
+                return str(market_cap)
+
+            # Format as ₹X Cr (Indian grouping)
+            # If value is very large (e.g., absolute rupees), convert to crores
+            # Heuristic: > 1e10 likely absolute rupees
+            if value > 1e10:
+                value = value / 1e7
+
+            formatted = f"₹{value:,.2f} Cr"
+            self._market_cap_cache[symbol] = formatted
+            return formatted
+
+        except Exception:
+            self._market_cap_cache[symbol] = None
+            return None
 
     def get_equity_master(self) -> list:
         """

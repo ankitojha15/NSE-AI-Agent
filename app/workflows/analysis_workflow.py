@@ -27,7 +27,7 @@ class AnalysisState(TypedDict):
     - status: "completed" | "insufficient_data"
     - error: failure detail, if any
     - persisted_id: id of the saved analysis result row
-    - provider_used: "groq" | "gemini" | None
+    - provider_used: "groq" | "cerebras" | None
     """
 
     symbol: str

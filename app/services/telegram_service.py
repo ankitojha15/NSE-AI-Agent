@@ -225,6 +225,8 @@ class TelegramService:
         symbol: str,
         analysis: dict,
         structured_analysis: dict,
+        company_name: str | None = None,
+        market_cap: str | None = None,
     ) -> str:
         # Sanitize LLM contradictions against contract truth
         structured_analysis = _sanitize_llm_fields(structured_analysis or {}, analysis or {})
@@ -238,9 +240,11 @@ class TelegramService:
         prev_p = periods.get("previous")
         yoy_p = periods.get("yoy")
 
-        # Reporting period block
+        # Reporting period block — include full name and market cap for every company
+        display_name = f"{symbol} ({company_name})" if company_name else symbol
+        cap_suffix = f" — Market Cap: {market_cap}" if market_cap else ""
         lines = []
-        lines.append(f"📊 NSE AI Analysis | {symbol}")
+        lines.append(f"📊 NSE AI Analysis | {display_name}{cap_suffix}")
         lines.append("")
 
         if latest_p and latest_p.get("from") and latest_p.get("to"):
@@ -407,12 +411,17 @@ class TelegramService:
         analysis: dict | None = None,
         structured_analysis: dict | None = None,
         score: int | None = None,
+        company_name: str | None = None,
+        market_cap: str | None = None,
     ):
         """
         Send the analysis summary for one company.
 
         ``score`` is accepted for backwards compat but ignored — the
         Telegram message no longer contains an AI score.
+        ``company_name`` and ``market_cap`` are rendered in the header
+        for every company so the symbol is always shown with its full
+        name and market cap.
 
         Returns a status dict. Never raises: any failure is caught and
         logged so the caller's analysis stays successful.
@@ -449,7 +458,13 @@ class TelegramService:
 
         # Deterministic message: facts from contract, commentary from LLM
         # (sanitized against contradictions).
-        message = self._build_message(symbol, analysis, structured_analysis)
+        message = self._build_message(
+            symbol,
+            analysis,
+            structured_analysis,
+            company_name=company_name,
+            market_cap=market_cap,
+        )
 
         parts = self._split_message(message)
 
