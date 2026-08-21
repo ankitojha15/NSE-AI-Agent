@@ -141,21 +141,90 @@ class AnalysisWorkflow:
                 "llm_analysis": None,
             }
 
+        # --- Structured validation: LLM must not contradict contract ---
+        # The contract is the source of truth for numeric facts. Strip
+        # any LLM claim that a metric is "missing" when the contract
+        # contains it, and ensure QoQ/YoY numbers always come from the
+        # deterministic comparison.
+        structured_dict = self._sanitize_llm_output(structured_dict, contract)
+
+        # Re-serialize after sanitization so persisted llm_analysis is clean
+        try:
+            structured_json = json.dumps(structured_dict)
+        except Exception:
+            pass
+
         return {
             "structured_analysis": structured_dict,
             "llm_analysis_valid": True,
             "llm_analysis": structured_json,
         }
 
+    @staticmethod
+    def _sanitize_llm_output(structured: dict, contract) -> dict:
+        """
+        Remove LLM statements that contradict the FinancialAnalysisContract.
+
+        The LLM is explanatory only — numeric truth comes from the contract.
+        """
+        if not structured or contract is None:
+            return structured
+
+        # Map contract latest snapshot field -> phrases that claim "missing"
+        metric_phrases = {
+            "sales": ["revenue missing", "sales missing", "revenue not available"],
+            "revenue": ["revenue missing", "revenue not available"],
+            "ebitda": ["ebitda missing", "ebitda not available", "ebitda unavailable"],
+            "net_profit": ["net profit missing", "net profit not available", "profit missing"],
+            "basic_eps": ["eps missing", "eps not available", "earnings per share missing"],
+            "opm": ["opm missing", "operating margin missing"],
+            "net_profit_margin": ["net profit margin missing"],
+        }
+
+        # Check latest snapshot for available metrics
+        latest = getattr(contract, "latest", None)
+        if latest is None:
+            return structured
+
+        sanitized = dict(structured)
+
+        for metric, phrases in metric_phrases.items():
+            val = getattr(latest, metric, None)
+            if val is None:
+                continue
+            for field in ("summary", "growth_analysis", "margin_analysis",
+                          "positive_factors", "negative_factors", "risk_factors"):
+                items = sanitized.get(field)
+                if items is None:
+                    continue
+                if isinstance(items, list):
+                    clean = []
+                    for item in items:
+                        low = str(item).lower()
+                        if any(p in low for p in phrases):
+                            continue
+                        clean.append(item)
+                    sanitized[field] = clean
+                elif isinstance(items, str):
+                    low = items.lower()
+                    if any(p in low for p in phrases):
+                        sanitized[field] = ""
+
+        return sanitized
+
     def _generate_company_score(self, state: AnalysisState):
         structured = state.get("structured_analysis")
 
+        # Prefer the LLM's score only when it actually provided one;
+        # otherwise use the deterministic rule-based score. This keeps
+        # numeric facts deterministic regardless of LLM wording.
         if structured is not None and state.get("llm_analysis_valid"):
-            score = structured.get("company_score")
-            explanation = structured.get("score_explanation")
-            return {"score": score, "score_explanation": explanation}
+            llm_score = structured.get("company_score")
+            llm_expl = structured.get("score_explanation")
+            if llm_score is not None:
+                return {"score": llm_score, "score_explanation": llm_expl}
 
-        # Safety fallback when the LLM response was invalid.
+        # Deterministic fallback (and now primary for user-facing).
         score, explanation = self._score_company(state["contract"])
 
         return {"score": score, "score_explanation": explanation}

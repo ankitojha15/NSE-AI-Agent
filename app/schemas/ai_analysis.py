@@ -16,5 +16,7 @@ class LLMAnalysisResult(BaseModel):
     growth_analysis: list[str] = Field(default_factory=list)
     margin_analysis: list[str] = Field(default_factory=list)
     risk_factors: list[str] = Field(default_factory=list)
-    company_score: int = Field(..., ge=0, le=100)
-    score_explanation: str
+    # Kept for internal compatibility (Qdrant, workflow) but no longer
+    # required from the LLM and never shown to users.
+    company_score: int | None = Field(default=None, ge=0, le=100)
+    score_explanation: str | None = None

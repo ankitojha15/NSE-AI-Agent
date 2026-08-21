@@ -3,6 +3,71 @@ from datetime import datetime
 
 DATE_FORMAT = "%d-%b-%Y"
 
+# ------------------------------------------------------------------
+# Quarter / FY label — single canonical definition for the project.
+# ------------------------------------------------------------------
+
+# Mapping from calendar month to fiscal quarter number.
+# Indian FY: Apr-Mar.  Q1=Apr-Jun, Q2=Jul-Sep, Q3=Oct-Dec, Q4=Jan-Mar.
+_QUARTER_BY_MONTH = {
+    1: 4, 2: 4, 3: 4,
+    4: 1, 5: 1, 6: 1,
+    7: 2, 8: 2, 9: 2,
+    10: 3, 11: 3, 12: 3,
+}
+
+
+def quarter_label(from_date: str, to_date: str) -> dict:
+    """
+    Derive a human-readable quarter / FY label from a period range.
+
+    Returns
+    -------
+    dict with keys:
+        quarter   e.g. "Q1"
+        fy        e.g. "FY2026-27"
+        label     e.g. "Q1 FY2026-27"
+        from_date e.g. "01-Apr-2026"
+        to_date   e.g. "30-Jun-2026"
+        range     e.g. "01-Apr-2026 → 30-Jun-2026"
+
+    The FY is the Indian financial year (Apr-Mar).  For Q4 the FY
+    straddles two calendar years, e.g. Jan-Mar 2026 belongs to
+    FY2025-26 even though ``to_date`` is in 2026.
+    """
+
+    try:
+        to_dt = datetime.strptime(to_date, DATE_FORMAT)
+    except (ValueError, TypeError):
+        return {
+            "quarter": "?",
+            "fy": "?",
+            "label": "?",
+            "from_date": from_date,
+            "to_date": to_date,
+            "range": f"{from_date} → {to_date}",
+        }
+
+    q = _QUARTER_BY_MONTH.get(to_dt.month, 1)
+
+    # FY start year: Apr-Dec belongs to that calendar year,
+    # Jan-Mar belongs to the previous calendar year.
+    if to_dt.month >= 4:
+        fy_start = to_dt.year
+    else:
+        fy_start = to_dt.year - 1
+
+    fy = f"FY{fy_start}-{str(fy_start + 1)[-2:]}"
+
+    return {
+        "quarter": f"Q{q}",
+        "fy": fy,
+        "label": f"Q{q} {fy}",
+        "from_date": from_date,
+        "to_date": to_date,
+        "range": f"{from_date} → {to_date}",
+    }
+
 
 def get_quarter_dates(qe_date: str):
     date = datetime.strptime(qe_date, DATE_FORMAT)

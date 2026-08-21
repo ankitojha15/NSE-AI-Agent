@@ -18,12 +18,13 @@ class SearchResponse(BaseModel):
 
 
 class AnalysisResponse(BaseModel):
-    """Structured AI analysis and company score."""
+    """Structured AI analysis (score kept internally, not user-facing)."""
 
     symbol: str
     status: str
     llm_analysis_valid: bool = False
     structured_analysis: dict | None = None
+    # Kept for backwards compat but not populated for user-facing use.
     score: int | None = None
     score_explanation: str | None = None
     message: str | None = None

@@ -20,7 +20,7 @@ class AIAnalysisService:
     def __init__(self, llm=None):
         self.llm = llm or ChatGroq(
             model=settings.GROQ_MODEL,
-            temperature=0.2,
+            temperature=0.0,
             api_key=settings.GROQ_API_KEY
         )
 
@@ -245,28 +245,33 @@ class AIAnalysisService:
     plans that are not present in the data.
     - If a metric or comparison is unavailable, state that it is
     unavailable.
+    - Do NOT recalculate growth percentages, margin changes, period
+    dates, or financial values — use ONLY the numbers in the contract.
+    - Do NOT claim a metric is missing when the contract contains it.
+    - Your role is qualitative commentary only; all numeric facts come
+    from the contract.
     - Do not provide investment advice.
     - Do not make future predictions.
 
     The contract contains:
-    - latest: the latest quarter metrics
+    - latest: the latest quarter metrics (in crore, except EPS per-share)
     - previous / same_quarter_last_year: the comparison periods
     - qoq / yoy: per-metric comparisons with growth_percent
-    (absolute metrics) or change (margin metrics)
-    - periods: validated reporting period ranges
+    (absolute metrics) or change (margin metrics) — use these directly
+    - periods: validated reporting period ranges with exact dates
     - completeness: which data is present or missing
 
     Respond with ONLY a single JSON object using exactly this schema:
     {{
-      "summary": "2-3 sentence summary",
+      "summary": "2-3 sentence summary of the quarter",
       "positive_factors": ["..."],
       "negative_factors": ["..."],
       "growth_analysis": ["..."],
       "margin_analysis": ["..."],
-      "risk_factors": ["..."],
-      "company_score": 0-100 integer,
-      "score_explanation": "why the score was assigned"
+      "risk_factors": ["..."]
     }}
+
+    Do NOT include any score or numeric recalculation fields.
 
     FINANCIAL CONTRACT (JSON):
     {contract_json}

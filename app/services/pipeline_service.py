@@ -36,6 +36,7 @@ from app.services.financial_contract_service import (
 from app.services.financial_insight_service import FinancialInsightService
 from app.services.nse_service import NseService
 from app.services.one_year_pipeline_service import OneYearPipelineService
+from app.services.telegram_service import TelegramService
 from app.services.vector_service import VectorService
 from app.services.xbrl_parser import XBRLParser
 from app.services.xbrl_service import XBRLService
@@ -59,6 +60,7 @@ class PipelineService:
         contract_service=None,
         vector_client=None,
         embedding_provider=None,
+        telegram_service=None,
     ):
         self.db = db
 
@@ -83,6 +85,8 @@ class PipelineService:
         self.vector_client = vector_client
         self.embedding_provider = embedding_provider
         self._vector_service = None
+
+        self.telegram_service = telegram_service or TelegramService(db=db)
 
         self._filings = []
 
@@ -436,6 +440,24 @@ class PipelineService:
                 symbol,
             )
             result["vector_point_id"] = None
+
+        # Stage 11 - Telegram notification (isolated so a messaging
+        # failure never marks the completed analysis as failed).
+        try:
+            telegram = self.telegram_service.send_analysis_notification(
+                symbol=symbol,
+                analysis=analysis,
+                structured_analysis=state.get("structured_analysis"),
+                score=state.get("score"),
+            )
+            result["telegram_status"] = telegram.get("status")
+        except Exception:
+            logger.exception(
+                "PIPELINE COMPANY | %s | stage: telegram_notification | "
+                "status: failed (analysis already completed)",
+                symbol,
+            )
+            result["telegram_status"] = "failed"
 
         return result
 

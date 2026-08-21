@@ -119,6 +119,24 @@ class FakeQdrantClient:
             }
 
 
+class FakeTelegramService:
+    """Mocked Telegram service: records calls, optional failure."""
+
+    def __init__(self):
+        self.calls = []
+        self.fail = False
+
+    def send_analysis_notification(
+        self, symbol, analysis=None, structured_analysis=None, score=None
+    ):
+        self.calls.append(symbol)
+
+        if self.fail:
+            raise RuntimeError("mocked Telegram failure")
+
+        return {"status": "sent", "symbol": symbol}
+
+
 def full_quarters():
     return [
         filing("ABC", "31-MAR-2026", 101, {
@@ -150,12 +168,13 @@ def make_db():
     return sessionmaker(bind=engine)()
 
 
-def make_pipeline(db, nse, ai, qdrant):
+def make_pipeline(db, nse, ai, qdrant, telegram=None):
     return PipelineService(
         db,
         nse_service=nse,
         ai_service=ai,
         vector_client=qdrant,
+        telegram_service=telegram or FakeTelegramService(),
     )
 
 
@@ -445,6 +464,45 @@ def test_legacy_rows_count_toward_quarters():
     print("PASS: legacy 4th quarter counted; company reached analysis")
 
 
+def test_telegram_after_success_and_non_fatal():
+    print("== 8. TELEGRAM NOTIFICATION (after success, non-fatal) ==")
+
+    db = make_db()
+    nse = FakeNseService([equity_record("ABC")], full_quarters())
+    ai = FakeAIService()
+    qdrant = FakeQdrantClient()
+    telegram = FakeTelegramService()
+
+    summary = make_pipeline(
+        db, nse, ai, qdrant, telegram=telegram
+    ).run(max_pages=50)
+
+    company = summary["companies"][0]
+    assert company["status"] == "ok", company
+    assert company["telegram_status"] == "sent", company
+    assert telegram.calls == ["ABC"], telegram.calls
+
+    print("  OK -> notification sent after successful analysis")
+
+    db = make_db()
+    nse = FakeNseService([equity_record("ABC")], full_quarters())
+    ai = FakeAIService()
+    qdrant = FakeQdrantClient()
+    telegram = FakeTelegramService()
+    telegram.fail = True
+
+    summary = make_pipeline(
+        db, nse, ai, qdrant, telegram=telegram
+    ).run(max_pages=50)
+
+    company = summary["companies"][0]
+    assert company["status"] == "ok", company
+    assert company["telegram_status"] == "failed", company
+    assert summary["companies_success"] == 1, summary
+
+    print("  OK -> Telegram failure never marks the company failed")
+
+
 def main():
     test_complete_flow()
     test_idempotent_execution()
@@ -453,6 +511,7 @@ def main():
     test_feed_fetched_once_multiple_companies()
     test_mocked_llm_and_qdrant()
     test_legacy_rows_count_toward_quarters()
+    test_telegram_after_success_and_non_fatal()
     print("\nALL PIPELINE TESTS PASSED")
 
 

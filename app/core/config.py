@@ -26,5 +26,9 @@ class Settings(BaseSettings):
     SCHEDULER_INTERVAL_MINUTES: int = 10
     SCHEDULER_MAX_PAGES: int = 50
 
+    # Telegram notifications (optional; disabled when not set)
+    TELEGRAM_BOT_TOKEN: str | None = None
+    TELEGRAM_CHAT_ID: str | None = None
+
 
 settings = Settings()

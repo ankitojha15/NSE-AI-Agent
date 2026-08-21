@@ -195,6 +195,8 @@ def main():
         **latest_row.raw_data,
         "fromDate": "invalid-date",
         "toDate": "2026-99-31",
+        "qe_Date": None,
+        "period": None,
     }
     db.commit()
 
