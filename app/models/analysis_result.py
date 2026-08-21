@@ -33,6 +33,7 @@ class AnalysisResult(Base):
 
     contract_data = Column(JSON, nullable=True)
     llm_analysis = Column(Text, nullable=True)
+    provider_used = Column(String(20), nullable=True)
 
     error = Column(Text, nullable=True)
 

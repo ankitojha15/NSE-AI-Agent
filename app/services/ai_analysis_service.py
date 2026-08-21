@@ -6,6 +6,7 @@ from langchain_groq import ChatGroq
 from app.core.config import settings
 from app.schemas.ai_analysis import LLMAnalysisResult
 from app.schemas.financial_analysis import FinancialAnalysisContract
+from app.utils.logger import logger
 
 
 class AIAnalysisService:
@@ -17,12 +18,81 @@ class AIAnalysisService:
     based only on the provided FinancialAnalysisContract.
     """
 
-    def __init__(self, llm=None):
+    def __init__(self, llm=None, gemini_llm=None):
         self.llm = llm or ChatGroq(
             model=settings.GROQ_MODEL,
             temperature=0.0,
             api_key=settings.GROQ_API_KEY
         )
+        # Injected Gemini mock for tests, or None for lazy real client
+        self._gemini_llm = gemini_llm
+        self._gemini_instance = None
+        self.last_provider_used: str | None = None
+        self.last_error: Exception | None = None
+
+    @property
+    def gemini_llm(self):
+        if self._gemini_llm is not None:
+            return self._gemini_llm
+        if self._gemini_instance is not None:
+            return self._gemini_instance
+        if not settings.GEMINI_API_KEY:
+            return None
+        try:
+            from langchain_google_genai import ChatGoogleGenerativeAI
+
+            self._gemini_instance = ChatGoogleGenerativeAI(
+                model=settings.GEMINI_MODEL,
+                google_api_key=settings.GEMINI_API_KEY,
+                temperature=0.0,
+            )
+            return self._gemini_instance
+        except Exception as e:
+            logger.warning(f"Failed to init Gemini client: {e}")
+            return None
+
+    @staticmethod
+    def _is_rate_limit_error(exc: Exception) -> bool:
+        # Do not treat auth errors as rate limits
+        msg = str(exc).lower()
+        # Auth errors must not trigger fallback (401/403)
+        if "authentication" in msg and "429" not in msg:
+            if "401" in msg or "403" in msg or "invalid api key" in msg or "api_key" in msg:
+                return False
+        cname = type(exc).__name__.lower()
+        if "authenticationerror" in cname or "permissiondenied" in cname:
+            return False
+        # Check status_code attribute (groq / google APIs)
+        status = getattr(exc, "status_code", None)
+        if status is None:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status == 429:
+            return True
+        if "ratelimit" in cname:
+            return True
+        if "429" in msg or "rate limit" in msg or "too many requests" in msg or "quota exceeded" in msg or "resource_exhausted" in msg:
+            # Ensure not auth masquerading as rate limit
+            if "401" in msg or "403" in msg:
+                return False
+            return True
+        return False
+
+    @staticmethod
+    def _is_auth_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        cname = type(exc).__name__.lower()
+        if "authenticationerror" in cname or "unauthenticated" in cname:
+            return True
+        status = getattr(exc, "status_code", None)
+        if status is None:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status in (401, 403):
+            return True
+        if "401" in msg or "403" in msg or "invalid api key" in msg or "authentication" in msg:
+            # If also 429, treat as rate limit not auth (rate limit check takes precedence)
+            if "429" not in msg:
+                return True
+        return False
 
     def prepare_filing_data(self, raw_data: dict):
 
@@ -286,12 +356,21 @@ class AIAnalysisService:
         """
         Generate a validated structured analysis for a contract.
 
-        Returns None when the LLM response is invalid, malformed or
-        fails Pydantic validation, so callers can fall back safely.
+        Primary: Groq. On HTTP 429 rate/quota error, falls back once to
+        Gemini with the identical prompt and validation. Other errors
+        (auth, validation, programming) do not trigger fallback.
+
+        Returns None when the LLM response is invalid/malformed so
+        callers can fall back to rule-based scoring. Raises on
+        rate-limit exhaustion (both providers failed) so the workflow
+        marks the company as failed (no Qdrant/Telegram).
         """
 
         prompt = self._build_structured_prompt(contract)
+        self.last_provider_used = None
+        self.last_error = None
 
+        # ---- Primary: Groq ----
         try:
             response = self.llm.invoke(prompt)
 
@@ -302,9 +381,48 @@ class AIAnalysisService:
             if not content:
                 return None
 
-            return LLMAnalysisResult.model_validate_json(content)
+            result = LLMAnalysisResult.model_validate_json(content)
+            self.last_provider_used = "groq"
+            return result
 
-        except (ValueError, TypeError, json.JSONDecodeError):
-            # Malformed JSON, missing fields, wrong types or an
-            # out-of-range score all land here.
-            return None
+        except Exception as exc:
+            # Rate/quota -> try Gemini once, do not retry Groq
+            if self._is_rate_limit_error(exc):
+                logger.warning(
+                    f"GROQ RATE LIMIT | symbol={contract.symbol} | error={exc} | falling back to Gemini ({settings.GEMINI_MODEL})"
+                )
+                self.last_error = exc
+                gemini = self.gemini_llm
+                if gemini is None:
+                    logger.error("Gemini fallback not configured (missing GEMINI_API_KEY)")
+                    raise exc
+                try:
+                    response2 = gemini.invoke(prompt)
+                    content2 = self._extract_json_content(
+                        getattr(response2, "content", None)
+                    )
+                    if not content2:
+                        logger.error("Gemini returned empty content")
+                        raise ValueError("Gemini empty response")
+                    result2 = LLMAnalysisResult.model_validate_json(content2)
+                    self.last_provider_used = "gemini"
+                    logger.info(f"GEMINI FALLBACK SUCCESS | symbol={contract.symbol}")
+                    return result2
+                except Exception as exc2:
+                    # Gemini structured validation errors (ValueError/TypeError/json) also count as Gemini failure
+                    if isinstance(exc2, (ValueError, TypeError, json.JSONDecodeError)):
+                        logger.error(f"Gemini structured validation failed: {exc2}")
+                    else:
+                        logger.error(f"Gemini fallback also failed: {exc2}")
+                    self.last_error = exc2
+                    # Both providers failed -> propagate original Groq rate-limit to mark company failed
+                    raise exc
+            # Auth errors must not fallback
+            if self._is_auth_error(exc):
+                logger.error(f"GROQ AUTH ERROR (no fallback) | symbol={contract.symbol} | error={exc}")
+                raise
+            # Validation / programming errors -> safe None, no fallback
+            if isinstance(exc, (ValueError, TypeError, json.JSONDecodeError)):
+                return None
+            # Other unexpected errors -> propagate (no fallback, company failed)
+            raise

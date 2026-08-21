@@ -27,6 +27,7 @@ class AnalysisState(TypedDict):
     - status: "completed" | "insufficient_data"
     - error: failure detail, if any
     - persisted_id: id of the saved analysis result row
+    - provider_used: "groq" | "gemini" | None
     """
 
     symbol: str
@@ -41,6 +42,7 @@ class AnalysisState(TypedDict):
     status: str
     error: str | None
     persisted_id: int | None
+    provider_used: str | None
 
 
 class AnalysisWorkflow:
@@ -120,12 +122,14 @@ class AnalysisWorkflow:
         contract = state["contract"]
 
         structured = self.ai_service.analyze_structured(contract)
+        provider_used = getattr(self.ai_service, "last_provider_used", None)
 
         if structured is None:
             return {
                 "structured_analysis": None,
                 "llm_analysis_valid": False,
                 "llm_analysis": None,
+                "provider_used": provider_used,
             }
 
         if isinstance(structured, LLMAnalysisResult):
@@ -139,6 +143,7 @@ class AnalysisWorkflow:
                 "structured_analysis": None,
                 "llm_analysis_valid": False,
                 "llm_analysis": None,
+                "provider_used": provider_used,
             }
 
         # --- Structured validation: LLM must not contradict contract ---
@@ -158,6 +163,7 @@ class AnalysisWorkflow:
             "structured_analysis": structured_dict,
             "llm_analysis_valid": True,
             "llm_analysis": structured_json,
+            "provider_used": provider_used,
         }
 
     @staticmethod
@@ -242,6 +248,7 @@ class AnalysisWorkflow:
             score=state.get("score"),
             score_explanation=state.get("score_explanation"),
             error=state.get("error"),
+            provider_used=state.get("provider_used"),
         )
 
         return {"status": "completed", "persisted_id": record.id}
@@ -406,5 +413,6 @@ class AnalysisWorkflow:
                 "status": "pending",
                 "error": None,
                 "persisted_id": None,
+                "provider_used": None,
             }
         )

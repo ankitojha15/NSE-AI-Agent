@@ -319,113 +319,204 @@ class FinancialAnalysisService:
     # Main comparison
     # ----------------------------------------------------------
 
+    @staticmethod
+    def _is_quarterly_candidate(cand: dict) -> bool:
+        """Reject Annual / Half-Yearly filings; accept Quarterly or unspecified."""
+        period = (cand.get("period") or cand.get("relatingTo") or "").strip().lower()
+        if not period:
+            return True
+        if "annual" in period or "half" in period or "yearly" in period and "quarter" not in period:
+            return False
+        # Explicit non-quarterly period field
+        if period and "quarter" not in period:
+            # e.g. period = "Annual" already handled, but be conservative
+            if period in ("annual", "half-yearly", "half yearly", "yearly"):
+                return False
+        return True
+
+    @staticmethod
+    def _extract_candidates(results) -> list:
+        if isinstance(results, dict):
+            return results.get("data") or results.get("results") or []
+        return results or []
+
+    def _collect_exact_yoy_matches(self, candidates: list, target_from, target_to) -> list:
+        """Return all candidates whose derived period exactly equals the YoY target."""
+        matches = []
+        for cand in candidates:
+            if not self._is_quarterly_candidate(cand):
+                continue
+            raw_from = cand.get("fromDate")
+            raw_to = cand.get("toDate")
+            if not raw_from or not raw_to:
+                from app.utils.quarter_utils import get_quarter_from_qe_date
+                q = get_quarter_from_qe_date(cand.get("qe_Date") or cand.get("period"))
+                if q:
+                    raw_from, raw_to = q
+            c_from = self._parse_date(raw_from)
+            c_to = self._parse_date(raw_to)
+            if c_from is None or c_to is None:
+                continue
+            if c_from == target_from and c_to == target_to:
+                matches.append((cand, c_from, c_to))
+        return matches
+
+    @staticmethod
+    def _choose_best_yoy_candidate(matches: list, latest_consolidated: str | None):
+        """
+        Deterministically choose one filing when multiple exact-period
+        candidates exist (e.g. standalone + consolidated duplicates).
+        Prefer the same reporting basis as the current quarter.
+        """
+        if not matches:
+            return None
+        if len(matches) == 1:
+            return matches[0]
+        # Prefer same consolidated/standalone basis as latest
+        if latest_consolidated:
+            for cand, c_from, c_to in matches:
+                if cand.get("consolidated") == latest_consolidated:
+                    return (cand, c_from, c_to)
+            for cand, c_from, c_to in matches:
+                if (cand.get("consolidated") or "").lower() == (latest_consolidated or "").lower():
+                    return (cand, c_from, c_to)
+        # Fallback: deterministic by seqNumber
+        def _seq_key(item):
+            cand = item[0]
+            return str(cand.get("seqNumber") or cand.get("seq_Id") or "")
+        matches.sort(key=_seq_key)
+        return matches[0]
+
+    def _persist_yoy_candidate(self, cand: dict, c_from, c_to, symbol: str, cache_key):
+        """XBRL extraction + duplicate-safe persistence for a YoY candidate."""
+        seq = cand.get("seqNumber") or cand.get("seq_Id")
+        if seq and not self.repository.exists(str(seq)):
+            if cand.get("xbrl"):
+                try:
+                    from app.services.xbrl_parser import XBRLParser
+                    from app.services.xbrl_service import XBRLService
+                    xbrl_svc = XBRLService()
+                    parser = XBRLParser()
+                    xml = xbrl_svc.download_xbrl(cand["xbrl"])
+                    root = parser.parse(xml)
+                    cand["financial_data"] = parser.extract_financial_data(root)
+                except Exception:
+                    pass
+            if "symbol" not in cand and "sym" in cand:
+                cand["symbol"] = cand["sym"]
+            if "seq_Id" not in cand and "seqNumber" in cand:
+                cand["seq_Id"] = cand["seqNumber"]
+            try:
+                created = self.repository.create(cand)
+                logger.info(
+                    "YOY HISTORICAL STORED | symbol: %s | seq: %s | period: %s → %s",
+                    symbol, seq, c_from.strftime("%d-%b-%Y"), c_to.strftime("%d-%b-%Y"),
+                )
+                item = {"result": created, "from_date": c_from, "to_date": c_to}
+                _yoy_cache[cache_key] = item
+                return item
+            except Exception:
+                logger.warning(
+                    "YOY HISTORICAL STORE FAILED | symbol: %s | seq: %s",
+                    symbol, seq, exc_info=True,
+                )
+        else:
+            existing = self.repository.get_by_seq_number(str(seq)) if seq else None
+            if existing:
+                item = {"result": existing, "from_date": c_from, "to_date": c_to}
+                _yoy_cache[cache_key] = item
+                return item
+        return None
+
     def _yoy_historical_lookup(self, symbol: str, target_from, target_to):
         """
         Try to find the YoY quarter beyond the current DB.
 
-        Uses NSE's corporates-financial-results API via NseService.
-        Only for quarterly, same-company, same-period lookups.
-        Returns a FinancialResult-like dict or None.
+        Searches multiple existing NSE financial-results sources:
+          1) corporates-financial-results with symbol + exact date range
+          2) corporates-financial-results with symbol-only (period=Quarterly),
+             filtered locally for exact target period.
+
+        Only exact (from_date, to_date) quarterly matches are accepted.
         Results are cached per (symbol, target period) within the process.
         """
         cache_key = (symbol, target_from.strftime("%Y%m%d"), target_to.strftime("%Y%m%d"))
         if cache_key in _yoy_cache:
             return _yoy_cache[cache_key]
 
-        # Try NSE historical search for the exact YoY period.
+        # Determine latest's reporting basis for deterministic choice
+        latest_basis = None
+        try:
+            latest_rows = self.repository.get_company_history(symbol)
+            if latest_rows:
+                latest_basis = (latest_rows[0].raw_data or {}).get("consolidated")
+                if not latest_basis:
+                    latest_basis = latest_rows[0].consolidated
+        except Exception:
+            pass
+
+        from_str = target_from.strftime("%d-%m-%Y")
+        to_str = target_to.strftime("%d-%m-%Y")
+        total_checked = 0
+
         try:
             from app.services.nse_service import NseService
-            from app.services.xbrl_parser import XBRLParser
-            from app.services.xbrl_service import XBRLService
 
             nse = NseService()
 
-            # NSE expects DD-MM-YYYY
-            from_str = target_from.strftime("%d-%m-%Y")
-            to_str = target_to.strftime("%d-%m-%Y")
-
+            # --- Source 1: date-filtered quarterly lookup (most precise) ---
             logger.info(
-                "YOY HISTORICAL SEARCH | symbol: %s | target: %s → %s",
+                "YOY SEARCH SOURCE | symbol: %s | source: corporates-financial-results (period=Quarterly, date-filtered) | target: %s → %s",
                 symbol, from_str, to_str,
             )
+            try:
+                results = nse.get_financial_results(
+                    symbol=symbol, period="Quarterly", from_date=from_str, to_date=to_str,
+                )
+            except Exception:
+                logger.warning("YOY SEARCH SOURCE FAILED | symbol: %s | source: date-filtered", symbol, exc_info=True)
+                results = []
+            candidates = self._extract_candidates(results)
+            total_checked += len(candidates)
+            matches = self._collect_exact_yoy_matches(candidates, target_from, target_to)
+            if matches:
+                chosen = self._choose_best_yoy_candidate(matches, latest_basis)
+                cand, c_from, c_to = chosen
+                logger.info(
+                    "YOY MATCH: FOUND | symbol: %s | source: date-filtered | seq=%s | period: %s → %s | candidates exact: %d/%d",
+                    symbol, cand.get("seqNumber") or cand.get("seq_Id"), c_from.strftime("%d-%b-%Y"), c_to.strftime("%d-%b-%Y"), len(matches), len(candidates),
+                )
+                persisted = self._persist_yoy_candidate(cand, c_from, c_to, symbol, cache_key)
+                if persisted:
+                    return persisted
 
-            results = nse.get_financial_results(
-                symbol=symbol,
-                from_date=from_str,
-                to_date=to_str,
+            # --- Source 2: symbol-only quarterly lookup, local exact-period filter (fallback) ---
+            logger.info(
+                "YOY SEARCH SOURCE | symbol: %s | source: corporates-financial-results (period=Quarterly, symbol-only) | target: %s → %s",
+                symbol, from_str, to_str,
             )
-
-            # get_financial_results may return a dict with 'data' or a list
-            if isinstance(results, dict):
-                candidates = results.get("data") or results.get("results") or []
-            else:
-                candidates = results or []
-
-            for cand in candidates:
-                raw_from = cand.get("fromDate")
-                raw_to = cand.get("toDate")
-                # Also try qe_Date-derived period
-                if not raw_from or not raw_to:
-                    from app.utils.quarter_utils import get_quarter_from_qe_date
-                    q = get_quarter_from_qe_date(cand.get("qe_Date") or cand.get("period"))
-                    if q:
-                        raw_from, raw_to = q
-
-                try:
-                    c_from = self._parse_date(raw_from)
-                    c_to = self._parse_date(raw_to)
-                except Exception:
-                    continue
-
-                if c_from == target_from and c_to == target_to:
-                    # Found exact YoY quarter — persist it for future runs
-                    seq = cand.get("seqNumber") or cand.get("seq_Id")
-                    if seq and not self.repository.exists(str(seq)):
-                        # Try to enrich with XBRL if available
-                        if cand.get("xbrl"):
-                            try:
-                                xbrl_svc = XBRLService()
-                                parser = XBRLParser()
-                                xml = xbrl_svc.download_xbrl(cand["xbrl"])
-                                root = parser.parse(xml)
-                                cand["financial_data"] = parser.extract_financial_data(root)
-                            except Exception:
-                                pass
-                        # Normalize symbol key for create()
-                        if "symbol" not in cand and "sym" in cand:
-                            cand["symbol"] = cand["sym"]
-                        if "seq_Id" not in cand and "seqNumber" in cand:
-                            cand["seq_Id"] = cand["seqNumber"]
-                        try:
-                            created = self.repository.create(cand)
-                            logger.info(
-                                "YOY HISTORICAL STORED | symbol: %s | seq: %s | period: %s → %s",
-                                symbol, seq, raw_from, raw_to,
-                            )
-                            # Return as a quarter-like item
-                            item = {
-                                "result": created,
-                                "from_date": c_from,
-                                "to_date": c_to,
-                            }
-                            _yoy_cache[cache_key] = item
-                            return item
-                        except Exception:
-                            logger.warning(
-                                "YOY HISTORICAL STORE FAILED | symbol: %s | seq: %s",
-                                symbol, seq, exc_info=True,
-                            )
-                    else:
-                        # Already in DB but was missed by _collect_quarters (e.g. bad financial_data) — return it
-                        existing = self.repository.get_by_seq_number(str(seq)) if seq else None
-                        if existing:
-                            item = {"result": existing, "from_date": c_from, "to_date": c_to}
-                            _yoy_cache[cache_key] = item
-                            return item
+            try:
+                results2 = nse.get_financial_results(symbol=symbol, period="Quarterly")
+            except Exception:
+                logger.warning("YOY SEARCH SOURCE FAILED | symbol: %s | source: symbol-only", symbol, exc_info=True)
+                results2 = []
+            candidates2 = self._extract_candidates(results2)
+            total_checked += len(candidates2)
+            matches2 = self._collect_exact_yoy_matches(candidates2, target_from, target_to)
+            if matches2:
+                chosen = self._choose_best_yoy_candidate(matches2, latest_basis)
+                cand, c_from, c_to = chosen
+                logger.info(
+                    "YOY MATCH: FOUND | symbol: %s | source: symbol-only | seq=%s | period: %s → %s | candidates exact: %d/%d",
+                    symbol, cand.get("seqNumber") or cand.get("seq_Id"), c_from.strftime("%d-%b-%Y"), c_to.strftime("%d-%b-%Y"), len(matches2), len(candidates2),
+                )
+                persisted = self._persist_yoy_candidate(cand, c_from, c_to, symbol, cache_key)
+                if persisted:
+                    return persisted
 
             logger.info(
-                "YOY HISTORICAL NOT FOUND | symbol: %s | target: %s → %s | candidates checked: %d",
-                symbol, from_str, to_str, len(candidates),
+                "YOY MATCH: NOT FOUND after historical search | symbol: %s | target: %s → %s | candidates checked total: %d (date-filtered: %d, symbol-only: %d)",
+                symbol, from_str, to_str, total_checked, len(candidates), len(candidates2) if 'candidates2' in locals() else 0,
             )
             _yoy_cache[cache_key] = None
         except Exception:

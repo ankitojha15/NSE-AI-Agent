@@ -28,6 +28,7 @@ class AnalysisResultRepository:
         score: int | None = None,
         score_explanation: str | None = None,
         error: str | None = None,
+        provider_used: str | None = None,
     ):
         """
         Insert or update the analysis result for a company.
@@ -45,6 +46,7 @@ class AnalysisResultRepository:
             existing.score = score
             existing.score_explanation = score_explanation
             existing.error = error
+            existing.provider_used = provider_used
 
             self.db.commit()
             self.db.refresh(existing)
@@ -59,6 +61,7 @@ class AnalysisResultRepository:
             score=score,
             score_explanation=score_explanation,
             error=error,
+            provider_used=provider_used,
         )
 
         self.db.add(result)
@@ -76,6 +79,7 @@ class AnalysisResultRepository:
                 score,
                 score_explanation,
                 error,
+                provider_used,
             )
 
         self.db.refresh(result)
