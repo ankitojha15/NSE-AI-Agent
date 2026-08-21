@@ -137,6 +137,64 @@ class XBRLParser:
 
         return value
 
+    def _extract_contexts(self, root):
+        """
+        Build a map of context id -> (startDate, endDate) for period filtering.
+
+        XBRL filings for Q4 audited results contain both quarterly (OneD,
+        3 months) and annual (FourD, 12 months) contexts. We must pick
+        the quarterly one for QoQ.
+        """
+
+        contexts = {}
+
+        for element in root.iter():
+            if element.tag.split("}")[-1] != "context":
+                continue
+
+            ctx_id = element.get("id")
+            if not ctx_id:
+                continue
+
+            start = None
+            end = None
+
+            for child in element:
+                if child.tag.split("}")[-1] == "period":
+                    for sub in child:
+                        tag = sub.tag.split("}")[-1]
+                        if tag == "startDate":
+                            start = (sub.text or "").strip()
+                        elif tag == "endDate":
+                            end = (sub.text or "").strip()
+                        elif tag == "instant":
+                            # Annual instant - not quarterly
+                            end = (sub.text or "").strip()
+
+            if start and end:
+                contexts[ctx_id] = (start, end)
+            elif end:
+                # Instant context - treat as single day period
+                contexts[ctx_id] = (end, end)
+
+        return contexts
+
+    def _is_quarterly_context(self, start, end):
+        """Return True if the period duration looks like a quarter (~89-93 days)."""
+
+        if not start or not end:
+            return False
+
+        try:
+            from datetime import datetime
+
+            s = datetime.strptime(start, "%Y-%m-%d")
+            e = datetime.strptime(end, "%Y-%m-%d")
+            delta = (e - s).days + 1  # inclusive
+            return 85 <= delta <= 95
+        except Exception:
+            return False
+
     def _sanitize(self, data):
         """
         Remove non-finite values (NaN, Infinity) from the data.
@@ -149,7 +207,7 @@ class XBRLParser:
 
         return data
 
-    def extract_financial_data(self, root):
+    def extract_financial_data(self, root, expected_from=None, expected_to=None):
         """
         Extract and normalize important financial metrics from XBRL.
 
@@ -184,7 +242,36 @@ class XBRLParser:
 
         currency = self._detect_currency(units)
 
+        contexts = self._extract_contexts(root)
+
+        # If expected period is known, we strictly match it.
+        # Otherwise, we prefer quarterly contexts over annual.
+        expected_start = None
+        expected_end = None
+        if expected_from and expected_to:
+            try:
+                from datetime import datetime
+                # expected_from/to are like "01-Jan-2026" — convert to YYYY-MM-DD for comparison
+                # Try to parse both formats
+                for fmt in ("%d-%b-%Y", "%Y-%m-%d", "%d-%m-%Y"):
+                    try:
+                        expected_start = datetime.strptime(expected_from, fmt).strftime("%Y-%m-%d")
+                        break
+                    except Exception:
+                        continue
+                for fmt in ("%d-%b-%Y", "%Y-%m-%d", "%d-%m-%Y"):
+                    try:
+                        expected_end = datetime.strptime(expected_to, fmt).strftime("%Y-%m-%d")
+                        break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
         data = {}
+        # Track which metrics we have already filled with a quarterly context
+        # so we don't overwrite them with an annual context later.
+        filled_quarterly = set()
 
         # Visit every XML element
         for element in root.iter():
@@ -194,14 +281,45 @@ class XBRLParser:
 
             if tag in required_tags:
 
+                # Context-based filtering: prefer quarterly period
+                ctx_id = element.get("contextRef")
+                ctx_start, ctx_end = contexts.get(ctx_id, (None, None))
+
+                # If we know the expected filing period, only accept exact match
+                if expected_start and expected_end:
+                    if ctx_start != expected_start or ctx_end != expected_end:
+                        continue
+                else:
+                    # No expected period: skip annual contexts, only take quarterly
+                    if ctx_start and ctx_end and not self._is_quarterly_context(ctx_start, ctx_end):
+                        # If we already have a quarterly value for this metric, skip annual
+                        # Otherwise, allow it as fallback only if no quarterly found yet
+                        metric_key = required_tags[tag]
+                        if metric_key in filled_quarterly:
+                            continue
+                        # Check if this is annual (12 months) — skip to prefer quarterly later
+                        # But if no quarterly exists at all, we'll take it as last resort
+                        # For now, skip non-quarterly and see if quarterly comes later
+                        # To handle ordering where annual comes after quarterly, we check:
+                        # If metric already filled with quarterly, skip annual
+                        if metric_key in data:
+                            # Data already has a value — check if existing was quarterly
+                            # If current is annual and existing is quarterly, skip
+                            continue
+
                 value = self._to_number(element.text)
 
                 measure = units.get(element.get("unitRef"))
 
-                data[required_tags[tag]] = self._normalize_monetary(
-                    value,
-                    measure
-                )
+                metric_key = required_tags[tag]
+                normalized = self._normalize_monetary(value, measure)
+
+                # Track if this was a quarterly context
+                is_q = self._is_quarterly_context(ctx_start, ctx_end) if ctx_start and ctx_end else True
+                if is_q:
+                    filled_quarterly.add(metric_key)
+
+                data[metric_key] = normalized
 
         # ---------------------------------------------------------
         # Calculate derived financial metrics

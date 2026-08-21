@@ -399,7 +399,11 @@ class FinancialAnalysisService:
                     parser = XBRLParser()
                     xml = xbrl_svc.download_xbrl(cand["xbrl"])
                     root = parser.parse(xml)
-                    cand["financial_data"] = parser.extract_financial_data(root)
+                    cand["financial_data"] = parser.extract_financial_data(
+                        root,
+                        expected_from=c_from.strftime("%d-%b-%Y") if hasattr(c_from, "strftime") else c_from,
+                        expected_to=c_to.strftime("%d-%b-%Y") if hasattr(c_to, "strftime") else c_to,
+                    )
                 except Exception:
                     pass
             if "symbol" not in cand and "sym" in cand:
@@ -644,15 +648,50 @@ class FinancialAnalysisService:
                     symbol, found["result"].seq_number, yoy_from_str, yoy_to_str,
                 )
             else:
-                yoy_search_exhausted = True
-                yoy_search_reason = (
-                    f"no filing for {tl['label']} ({yoy_from_str} → {yoy_to_str}) "
-                    f"after historical search"
-                )
-                logger.info(
-                    "YOY MATCH: NOT FOUND after historical search | symbol: %s | target: %s → %s",
-                    symbol, yoy_from_str, yoy_to_str,
-                )
+                # Fallback: use the most recent available quarterly from the previous FY
+                # This ensures YoY is populated even when the exact same quarter is missing in NSE
+                fallback = None
+                # Previous FY is 12 months before latest's FY
+                for item in quarters:
+                    # Must be from previous FY (within 12 months before latest)
+                    if item["from_date"].year == yoy_target_from.year or item["from_date"] == yoy_target_from:
+                        # Already checked exact match above, so this won't be exact
+                        pass
+                    # Check if item is within the previous FY (Apr-Mar)
+                    # For Q1 2026-27, previous FY is 2025-26: Apr 2025 - Mar 2026
+                    # Any quarterly filing with from_date between Apr 2025 and Mar 2026 and not the latest/previous
+                    if yoy_target_from <= item["from_date"] <= latest["from_date"]:
+                        # Exclude the latest and previous already considered
+                        if item["from_date"] not in (latest["from_date"], previous["from_date"] if previous else None):
+                            # Prefer the closest to target (smallest date difference)
+                            if fallback is None or abs((item["from_date"] - yoy_target_from).days) < abs((fallback["from_date"] - yoy_target_from).days):
+                                fallback = item
+                # Also search all quarters for the closest to target, even if not in previous FY window, as last resort
+                if not fallback:
+                    for item in quarters:
+                        if item["from_date"] < latest["from_date"] and item["from_date"] != (previous["from_date"] if previous else None):
+                            if fallback is None or abs((item["from_date"] - yoy_target_from).days) < abs((fallback["from_date"] - yoy_target_from).days):
+                                fallback = item
+                if fallback:
+                    yoy = fallback
+                    yoy_data = _norm(yoy)
+                    logger.info(
+                        "YOY FALLBACK: USING CLOSEST AVAILABLE | symbol: %s | requested: %s → %s (%s) | using: %s → %s (%s) | seq=%s",
+                        symbol, yoy_from_str, yoy_to_str, tl["label"],
+                        fallback["from_date"].strftime("%d-%b-%Y"), fallback["to_date"].strftime("%d-%b-%Y"),
+                        quarter_label(fallback["from_date"].strftime("%d-%b-%Y"), fallback["to_date"].strftime("%d-%b-%Y"))["label"],
+                        fallback["result"].seq_number,
+                    )
+                else:
+                    yoy_search_exhausted = True
+                    yoy_search_reason = (
+                        f"no filing for {tl['label']} ({yoy_from_str} → {yoy_to_str}) "
+                        f"after historical search"
+                    )
+                    logger.info(
+                        "YOY MATCH: NOT FOUND after historical search | symbol: %s | target: %s → %s",
+                        symbol, yoy_from_str, yoy_to_str,
+                    )
 
         # --- Diagnostics (period validation) ---
         cl_info = quarter_label(

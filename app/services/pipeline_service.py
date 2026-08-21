@@ -315,7 +315,11 @@ class PipelineService:
             try:
                 xml = xbrl_service.download_xbrl(record["xbrl"])
                 root = parser.parse(xml)
-                financial_data = parser.extract_financial_data(root)
+                financial_data = parser.extract_financial_data(
+                    root,
+                    expected_from=record.get("fromDate"),
+                    expected_to=record.get("toDate"),
+                )
 
                 self.financial_repo.update_financial_data(
                     seq_id, financial_data

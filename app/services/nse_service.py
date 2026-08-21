@@ -512,7 +512,9 @@ class NseService:
                         root = parser.parse(xml)
 
                         financial_data = parser.extract_financial_data(
-                            root
+                            root,
+                            expected_from=record.get("fromDate"),
+                            expected_to=record.get("toDate"),
                         )
 
                         repository.update_financial_data(
@@ -559,7 +561,9 @@ class NseService:
                     root = parser.parse(xml)
 
                     financial_data = parser.extract_financial_data(
-                        root
+                        root,
+                        expected_from=record.get("fromDate"),
+                        expected_to=record.get("toDate"),
                     )
 
                     result["financial_data"] = financial_data
@@ -673,7 +677,11 @@ class NseService:
 
                     root = parser.parse(xml)
 
-                    financial_data = parser.extract_financial_data(root)
+                    financial_data = parser.extract_financial_data(
+                        root,
+                        expected_from=result.get("fromDate"),
+                        expected_to=result.get("toDate"),
+                    )
 
                     print("EXTRACTED FINANCIAL DATA:", financial_data)
 
@@ -763,7 +771,9 @@ class NseService:
                             # Extract financial metrics from XBRL.
                             financial_data = (
                                 parser.extract_financial_data(
-                                    root
+                                    root,
+                                    expected_from=result.get("fromDate"),
+                                    expected_to=result.get("toDate"),
                                 )
                             )
 
@@ -815,7 +825,9 @@ class NseService:
                     # Extract financial metrics.
                     financial_data = (
                         parser.extract_financial_data(
-                            root
+                            root,
+                            expected_from=result.get("fromDate"),
+                            expected_to=result.get("toDate"),
                         )
                     )
 
